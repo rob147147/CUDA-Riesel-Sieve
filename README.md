@@ -5,9 +5,10 @@ The GPU takes an array of prime numbers which may be prime factors of numbers of
 
 The core algorithm run on the GPU is the Baby Steps Giants Steps (BSGS) algorithm for solving the discrete logarithm. 
 
-
-This is very much a work in progress but these are some current performance numbers from CUDA enabled NVidia GPUs to which I have access. The test file is R745.ABCD which contains 22 k-values, with n-min = 180,000 and n-max = 250,000 giving an n-range of 70,000.<br />
-
+<br />
+This is very much a work in progress but these are some current performance numbers from CUDA enabled NVidia GPUs to which I have access.<br />
+The test file is R745.ABCD which contains 22 k-values, with n-min = 180,000 and n-max = 250,000 giving an n-range of 70,000.<br />
+<br />
 CPU (1 core of i5-4440 @ 3.1Ghz) - 6,000,000 p/sec<br />
 GeForce GT 710 (366 GFLOPS, 19 Watts) - 775,000 p/sec<br />
 GeForce 840M (790 GFLOPS, 30 Watts) - 1,080,000 p/sec<br />
