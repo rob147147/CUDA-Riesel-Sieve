@@ -10,7 +10,7 @@ This is very much a work in progress but these are some current performance numb
 The test file is R745.ABCD which contains 22 k-values, with n-min = 180,000 and n-max = 250,000 giving an n-range of 70,000.<br />
 <br />
 CPU (1 core of i5-4440 @ 3.1Ghz) - 6,000,000 p/sec<br />
-GeForce GT 710 (366 GFLOPS, 1GB RAM, 512kb L2 cache, 19 Watts) - 680,000 p/sec<br />
+GeForce GT 710 (366 GFLOPS, 1GB RAM, 512kb L2 cache, 19 Watts) - 756,000 p/sec<br />
 GeForce 840M (790 GFLOPS, 30 Watts) - ?? p/sec<br />
 GeForce 960M (1403 GFLOPS, 2GB RAM, 2048kb L2 cache, 65 Watts) - 2,980,000 p/sec<br />
 GeForce GTX 1060 (3855 GFLOPS, 6GB RAM, ??kb L2 cache, 120 Watts) - ?? p/sec<br /> 
