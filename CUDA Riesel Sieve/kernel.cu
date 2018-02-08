@@ -17,25 +17,30 @@
 
 using namespace std;
 
-cudaError_t addWithCuda(int *NOut, unsigned long long *KernelP, unsigned int size, const int blocks, const int threads, int *hashKeys);
+cudaError_t addWithCuda(int *NOut, unsigned long long *KernelP, unsigned int size, const int blocks, const int threads, int *hashKeys, int hashElements, int hashDensity, unsigned int *bits);
 int *dev_a = 0; //NOut
 unsigned long long *dev_b = 0; //KernelP
-int *dev_c = 0; //kns
-int *dev_e = 0; //Base
-int *dev_f = 0; //counterIn
+//int *dev_c = 0; //kns
+__constant__ int dev_c[512];
+int *dev_e; //Base
+int *dev_f; //counterIn
 int *dev_g = 0; //HashTable Keys
+int *dev_h = 0; //HashTableElements
+int *dev_i = 0; //HashTableDensity
+unsigned int *dev_j = 0;
 
 cudaError_t cudaStatus;
 
 
-__device__  __forceinline__ void xbinGCDnew(unsigned long long a, unsigned long long b, unsigned long long &u, unsigned long long &v)
+__device__  __forceinline__ void xbinGCDnew(unsigned long long a, unsigned long long beta, unsigned long long &u, unsigned long long &v)
 {
-	unsigned long long alpha, beta;
+	unsigned long long alpha;
 	u = 1; v = 0;
-	alpha = a; beta = b; // Note that alpha is
-						 // even and beta is odd.
-						 /* The invariant maintained from here on is:
-						 2a = u*2*alpha - v*beta. */
+	alpha = a;
+	// Note that alpha is
+	// even and beta is odd.
+	// The invariant maintained from here on is: 2a = u*2*alpha - v*beta.
+
 	while (a > 0) {
 		a = a >> 1;
 		if ((u & 1) == 0) { // Delete a common
@@ -80,13 +85,13 @@ __device__ __forceinline__ unsigned long long modul64(unsigned long long x, unsi
 	and z, giving the remainder (modulus) as the result.
 	Must have x < z (to get a 64-bit result). This is
 	checked for. */
-	long long i, t;
+	long long t;
 	if (x >= z) {
 		printf("Bad call to modul64, must have x < z.");
 	}
-	for (i = 1; i <= 64; i++) { // Do 64 times.
+	for (int i = 1; i <= 64; i++) { // Do 64 times.
 		t = (long long)x >> 63; // All 1's if x(63) = 1.
-		x = (x << 1) | (y >> 63); // Shift x || y left
+		x = (x << 1) | (y >> 63); // Shift x || y left      <- Bitwise OR?
 		y = y << 1; // one bit.
 		if ((x | t) >= z) {
 			x = x - z;
@@ -185,35 +190,50 @@ __device__ __forceinline__ long long binExtEuclid(long long a, long long b) {
 }
 
 
-__global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *ks, int *Base, int *counterIn, int *hashKeys)
+
+__global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ int *Base, int *counterIn, int *hashKeys, int *hashElements, int *hashDensity, unsigned int *bits)
 {
 	clock_t beginfull = clock();
 	clock_t begin = clock();
-	int i = threadIdx.x;
-	int block = blockIdx.x;
-	int N = blockDim.x * gridDim.x; //This is threads*blocks
 
 	//This deals with the hashTables
-	int m = 512;
-	int shift = 9; //m=2^shift
-	int mem = m * 4; //This is hashTableElements * 4 to reduce collisions. Must be a power of 2
-	int memN = (N * mem) - 1; //We use this for doing cheap modulo's as N*mem should be a power of 2
-	unsigned int bitArray[64]; //Bit array for hash table
+	const int m = *hashElements;
+	const int mem = m * (*hashDensity); //This is hashTableElements * 4 to reduce collisions. Must be a power of 2
+	const int ints = mem / 32;
+
+	int shift = 0;
+	int tempM = m;
+	//m=2^shift, calculate shift
+	while (tempM > 1) {
+		tempM = tempM >> 1;
+		shift++;
+	}
+
+
+	/*unsigned int bitArray[mem/32]; //Bit array for hash table
 
 	for (int ii = 0; ii < 64; ii++) {
 		bitArray[ii] = 0;
-	}
+	}*/
 
-	int S = (block * blockDim.x) + i; //This is this block ID*threads in a block + threadID
+	int S = (blockIdx.x * blockDim.x) + threadIdx.x; //This is this block ID*threads in a block + threadID
 	int Sm = S*mem;
 
+	bool printer = false;
+	if (S == 0) {
+		printer = true;
+	}
+
+	//extern __shared__ int bitArray[];
+
+	//for (int ii = 0; ii < 64; ii++) {
+	//	bitArray[threadIdx.x * 64 + ii] = 0;
+	//}
+
 	unsigned long long b = KernelP[S];
-	unsigned long long KernelBase = *Base;
-	int outputBase = KernelBase;
-	int counter = *counterIn;
-	int Q = ks[2];
-	int NMin = ks[0]/Q;
-	int NMax = (ks[1]/Q)+1;
+	int Q = dev_c[2];
+	int NMin = dev_c[0]/Q;
+	int NMax = (dev_c[1]/Q)+1;
 
 	unsigned long long bprime = 0;
 	unsigned long long rInv = 0;
@@ -222,15 +242,13 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *ks, int 
 	int modul = 0;
 	int mulul = 0;
 
-	bool printer = false;
-	if (i == 0 & block == 0) {
-		printer = true;
-	}
 
 	clock_t end = clock();
 	int time_spent = (end - begin);
 	if (printer) {
-		printf("KernelBase = %d\n", KernelBase);
+		printf("KernelBase = %d\n", *Base);
+		printf("HashTableElements = %d. %d at 1/%d density.\n", mem,m,*hashDensity);
+		printf("Each Thread should use %d ints in its bit array.\n", ints);
 		printf("Q = %d, NMin = %d, NMax = %d\n", Q,NMin, NMax);
 		printf("Cycles to complete variable setup was %d\n", time_spent);
 	}
@@ -248,8 +266,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *ks, int 
 	}
 
 
-
-	KernelBase = modul64(KernelBase, 0, b);
+	unsigned long long KernelBase = modul64(*Base, 0, b);
 	modul++;
 	unsigned long long newKB = modul64(1, 0, b);
 	modul++;
@@ -340,8 +357,9 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *ks, int 
 				beginhash = clock();
 			}
 
-			if ((bitArray[hash / 32] & (1 << (hash & 31))) == 0) {
-				bitArray[hash / 32] += 1 << (hash & 31);
+			//if (hashKeys[(Sm + hash)] == 0) {
+			if ((bits[S*ints + (hash / 32)] & (1 << (hash & 31))) == 0) {
+				bits[S*ints + (hash / 32)] += 1 << (hash & 31);
 
 				//Don't store it - we'll try and re-calculate it
 				hashKeys[(Sm + hash)] = js; //This costs around 3750 cycles
@@ -429,26 +447,26 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *ks, int 
 	bool skip = false;
 	int thisk = 0;
 	//The first 3 values of ks contain NMin, NMax and Q now, so start at 3.
-	for (int k = 3; k < counter; k++) {
+	for (int k = 3; k < *counterIn; k++) {
 		if (skip) {
 			skip = false;
 		}
 
-		else if (ks[k] == -1) {
+		else if (dev_c[k] == -1) {
 			//This isn't a k-value, it proves the k-value is next
-			thisk = ks[k+1];
+			thisk = dev_c[k+1];
 			fixedBeta = modul64(thisk, 0, b);
 			modul++;
 			skip = true;
 		}
 		else {
-			int remainder = ks[k];
+			int remainder = dev_c[k];
 
 			//Using subsequence k should be updated to be k*b^remainder
 			unsigned long long sB = fixedsB;
 			for (int rem = 0; rem < remainder; rem++) {
 				sB = montmul(sB, KernelBase, b, bprime);
-				montmuls;
+				montmuls++;
 			}
 
 			beta = montmul(fixedBeta, sB, b, bprime);
@@ -477,7 +495,8 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *ks, int 
 						maxProbe = probe;
 					}
 					lookups++;
-					if ((bitArray[hash / 32] & (1 << (hash & 31))) == 0) {
+					//if (hashKeys[(Sm + hash)] == 0) {
+					if ((bits[S*ints + (hash / 32)] & (1 << (hash & 31))) == 0) {
 						//Beta is not here
 						break;
 					}
@@ -521,7 +540,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *ks, int 
 				output = -4;
 			}
 			else {
-				printf("Output will be %llu | %d*%d^%d-1\n", b, thisk, outputBase, (output*Q)+ks[k]);
+				printf("Output will be %llu | %d*%d^%d-1\n", b, thisk, *Base, (output*Q)+ dev_c[k]);
 				output = -5;
 			}
 		}
@@ -532,7 +551,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *ks, int 
 		printf("Number of collisions: %d\n", collisions);
 		printf("Number of lookups against hash table was %d\n", lookups);
 		printf("Max probe length was %d\n", maxProbe);
-		printf("Average probe length was %f\n", avgProbe / 3080);
+		printf("Average probe length was %f\n", avgProbe / giant);
 	}
 
 	end = clock();
@@ -563,8 +582,8 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *ks, int 
 }
 
 
-
-int main()
+//Update this at some point to use getopt
+int main(int argc, char* argv[])
 {
 	const int kb = 1024;
 	const int mb = kb * kb;
@@ -594,6 +613,12 @@ int main()
 		wcout << "  L2 Cache Size: " << props.l2CacheSize / kb << "kb" << endl;
 		wcout << endl;
 	}
+
+	unsigned long long targetHashSize = 1;
+	while (targetHashSize < props.totalGlobalMem / 2) {
+		targetHashSize = targetHashSize << 1;
+	}
+	wcout << "Should target a " << targetHashSize / mb << "mb hash table" << endl << endl;
 
 	//Read in an ABCD file and parse ----------------------------------------------------------------------------
 	string line;
@@ -805,30 +830,41 @@ int main()
 
 	free(subseq);
 
-	//Print it out to check
-	//for (int qqqqq = 0; qqqqq < count1 * 2 + minSubs; qqqqq++) {
-	//	cout << qqqqq << ": " << ks2[qqqqq] << endl;
-	//}
-
-	//ks2 now contains all k's and their exponents so we can perform k*b^remainder on the GPU -------------------
-
 
 	//Generate Primes -------------------------------------------------------------------------------------------
 
-	const int blocks = 1024;
-	const int threads = 64; //These must multiply to around 65536. Larger and CUDA times out
+	int blockScale = 32; //Default scaling
+	int threadScale = 2; //Default scaling 
+	//Use the input arguments to change blocks and threads. 
+	if (argc == 2) {
+		//Assume only a threadScale - we must check this is a power of 2 at some point
+		threadScale = atoi(argv[1]);
+	}
+	if (argc == 3) {
+		//Assume threadScale and then blockScale - - we must check these are both a power of 2 at some point
+		threadScale = atoi(argv[1]);
+		blockScale = atoi(argv[2]);
+	}
+
+	const int blocks = 32 * blockScale;
+	const int threads = 32 * threadScale; //These must multiply to around 65536. Larger and CUDA times out
 	const int arraySize = blocks*threads;
 	const int testArraySize = arraySize * 24;
-	const int hashTableElements = 512;
 	const int hashScaling = 4;
+
+	//Use targetHashSize to set up the hash table - int = 32 bits = 4 bytes, so divide by 4
+	//Each thread requires the a hash table, so also divide by arraySize
+	long long longhashTableSize = (((targetHashSize / 4) / arraySize)/hashScaling);
+	int hashTableSize = longhashTableSize;
+	cout << "Each thread should have " << hashTableSize*hashScaling << " buckets, to store " << hashTableSize << " elements. (Density 1/" << hashScaling << ")" << endl;
+
 	unsigned long long *KernelP = (unsigned long long *)malloc(arraySize*sizeof(unsigned long long));
-	//unsigned long long KernelP[arraySize] = { 0 };
 	int *NOut = (int *)malloc(arraySize*sizeof(int));
-	//int NOut[arraySize] = { 0 };
-	int *hashKeys = (int *)malloc(arraySize * hashTableElements * hashScaling * sizeof(int));
-	memset(hashKeys, 0, arraySize * hashTableElements * hashScaling * sizeof(int));
-	//unsigned long long *hashValues = (unsigned long long *)malloc(arraySize * hashTableElements * sizeof(unsigned long long));
-	//memset(hashValues, 0, arraySize * hashTableElements * sizeof(unsigned long long));
+	int *hashKeys = (int *)malloc(arraySize * hashTableSize * hashScaling * sizeof(int));
+	unsigned int *bits = (unsigned int *)malloc(((arraySize * hashTableSize * hashScaling)/32) * sizeof(int));
+	memset(hashKeys, 0, arraySize * hashTableSize * hashScaling * sizeof(int));
+	memset(bits, 0, ((arraySize * hashTableSize * hashScaling)/32) * sizeof(int));
+
 
 	//Low should be greater than the primes we use below. 
 	//unsigned long long low = 6000000000;
@@ -912,11 +948,11 @@ int main()
 		goto Error;
 	}
 
-	cudaStatus = cudaMalloc((void**)&dev_c, (count1 * 2 + minSubs + 3) * sizeof(int));
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
-	}
+	//cudaStatus = cudaMalloc((void**)&dev_c, (count1 * 2 + minSubs + 3) * sizeof(int));
+	//if (cudaStatus != cudaSuccess) {
+	//	fprintf(stderr, "cudaMalloc failed!");
+	//	goto Error;
+	//}
 
 	cudaStatus = cudaMalloc((void**)&dev_e, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
@@ -930,21 +966,37 @@ int main()
 		goto Error;
 	}
 
-	cudaStatus = cudaMalloc((void**)&dev_g, arraySize * hashTableElements * hashScaling * sizeof(int));
+	cudaStatus = cudaMalloc((void**)&dev_g, arraySize * hashTableSize * hashScaling * sizeof(int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
 		goto Error;
 	}
 
-	//cudaStatus = cudaMalloc((void**)&dev_h, arraySize * hashTableElements * sizeof(unsigned long long));
-	//if (cudaStatus != cudaSuccess) {
-	//	fprintf(stderr, "cudaMalloc failed!");
-	//	goto Error;
-	//}
-
-	cudaStatus = cudaMemcpy(dev_c, ks2, (count1 * 2 + minSubs + 3) * sizeof(int), cudaMemcpyHostToDevice);
+	cudaStatus = cudaMalloc((void**)&dev_h, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy failed!");
+		fprintf(stderr, "cudaMalloc failed!");
+		goto Error;
+	}
+
+	cudaStatus = cudaMalloc((void**)&dev_i, sizeof(int));
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaMalloc failed!");
+		goto Error;
+	}
+
+	cudaStatus = cudaMalloc((void**)&dev_j, ((arraySize * hashTableSize * hashScaling) / 32) * sizeof(unsigned int));
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaMalloc failed!");
+		goto Error;
+	}
+
+	//Copy the data to the correct GPU buffers
+
+	//Lets try storing the k values and remainders in constant memory instead
+	cudaStatus = cudaMemcpyToSymbol(dev_c, ks2, (count1 * 2 + minSubs + 3) * sizeof(int));
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaMemcpy to constant memory failed!");
+		cout << (count1 * 2 + minSubs + 3) * sizeof(int) << "bytes" << endl;
 		goto Error;
 	}
 
@@ -960,17 +1012,29 @@ int main()
 		goto Error;
 	}
 
-	cudaStatus = cudaMemcpy(dev_g, hashKeys, arraySize * hashTableElements * hashScaling * sizeof(int), cudaMemcpyHostToDevice);
+	cudaStatus = cudaMemcpy(dev_g, hashKeys, arraySize * hashTableSize * hashScaling * sizeof(int), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMemcpy input failed!");
 		goto Error;
 	}
 
-	//cudaStatus = cudaMemcpy(dev_h, hashValues, arraySize * hashTableElements * sizeof(unsigned long long), cudaMemcpyHostToDevice);
-	//if (cudaStatus != cudaSuccess) {
-	//	fprintf(stderr, "cudaMemcpy input failed!");
-	//	goto Error;
-	//}
+	cudaStatus = cudaMemcpy(dev_h, &hashTableSize, sizeof(int), cudaMemcpyHostToDevice);
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaMemcpy failed!");
+		goto Error;
+	}
+
+	cudaStatus = cudaMemcpy(dev_i, &hashScaling, sizeof(int), cudaMemcpyHostToDevice);
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaMemcpy failed!");
+		goto Error;
+	}
+
+	cudaStatus = cudaMemcpy(dev_j, bits, ((arraySize * hashTableSize * hashScaling) / 32) * sizeof(unsigned int), cudaMemcpyHostToDevice);
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaMemcpy failed!");
+		goto Error;
+	}
 
 	int kernelCount = 0;
 	clock_t loopTime = clock();
@@ -1034,7 +1098,7 @@ int main()
 		//This uses the full ABCD file, but runs very slowly when file is big
 		//cudaError_t cudaStatus = addWithCuda(NOut, KernelP, kns, &base, &count3, arraySize, count3, blocks, threads);
 		//This is datless - remember to change to addkernel1
-		cudaError_t cudaStatus = addWithCuda(NOut, KernelP, arraySize, blocks, threads, hashKeys);
+		cudaError_t cudaStatus = addWithCuda(NOut, KernelP, arraySize, blocks, threads, hashKeys, hashTableSize, hashScaling, bits);
 		if (cudaStatus != cudaSuccess) {
 			fprintf(stderr, "addWithCuda failed!");
 			return 1;
@@ -1075,6 +1139,10 @@ int main()
 		wcout << endl;
 	}
 
+	cout << "Each thread used " << hashTableSize*hashScaling << " buckets, to store " << hashTableSize << " elements. (Density 1/" << hashScaling << ")" << endl;
+	cout << "Hash table size was " << (hashTableSize*hashScaling * 4 * arraySize) / mb << "mb of GPU RAM" << endl;
+	cout << "Blocksize = " << blocks << ". Threads per block = " << threads << "." << endl;
+
 Error:
 	cudaFree(dev_a);
 	cudaFree(dev_b);
@@ -1082,7 +1150,8 @@ Error:
 	cudaFree(dev_e);
 	cudaFree(dev_f);
 	cudaFree(dev_g);
-	//cudaFree(dev_h);
+
+	cudaFree(dev_j);
 	return cudaStatus;
 
 	// cudaDeviceReset must be called before exiting in order for profiling and
@@ -1097,7 +1166,7 @@ Error:
 }
 
 // Helper function for using CUDA to add vectors in parallel.
-cudaError_t addWithCuda(int *NOut, unsigned long long *KernelP, unsigned int size, const int blocks, const int threads, int *hashKeys)
+cudaError_t addWithCuda(int *NOut, unsigned long long *KernelP, unsigned int size, const int blocks, const int threads, int *hashKeys, int hashElements, int hashDensity, unsigned int *bits)
 {
 
 	// Copy input vectors from host memory to GPU buffers.
@@ -1106,15 +1175,15 @@ cudaError_t addWithCuda(int *NOut, unsigned long long *KernelP, unsigned int siz
 		fprintf(stderr, "cudaMemcpy input failed!");
 	}
 
-	//cudaStatus = cudaMemset(dev_g, 0, size * hashTableElements * 4 * sizeof(int));
-	//if (cudaStatus != cudaSuccess) {
-	//	fprintf(stderr, "cudaMemcpy input failed!");
-	//}
+	cudaStatus = cudaMemset(dev_g, 0, size * hashElements * hashDensity * sizeof(int));
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaMemcpy input failed!");
+	}
 
-	//	cudaStatus = cudaMemset(dev_h, 0, size * hashTableElements * sizeof(unsigned long long));
-	//	if (cudaStatus != cudaSuccess) {
-	//		fprintf(stderr, "cudaMemcpy input failed!");
-	//	}
+	cudaStatus = cudaMemset(dev_j, 0, ((size * hashElements * hashDensity) / 32) * sizeof(unsigned int));
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaMemcpy input failed!");
+	}
 
 
 	//cudaEvent_t start, stop;
@@ -1126,7 +1195,11 @@ cudaError_t addWithCuda(int *NOut, unsigned long long *KernelP, unsigned int siz
 	//cudaStream_t stream1;
 	cudaStreamCreate(&stream0);
 	//cudaStreamCreate(&stream1);
-	addKernel1 << <blocks, threads, 0, stream0 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g);
+	addKernel1 <<<blocks, threads, 0, stream0 >>>(dev_a, dev_b, /*dev_c, */dev_e, dev_f, dev_g, dev_h, dev_i, dev_j);
+	
+	//This uses too much shared memory and kills occupancy. Really we want to use no more than 16 ints per thread (for 64 threads per block)!
+	//addKernel1 << <blocks, threads, ((threads*hashElements*hashDensity) / 32)*sizeof(int), stream0 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h, dev_i);
+
 	//addKernel1<<<blocks,threads,0,stream1>>>(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h);
 	//cudaEventRecord(stop);
 
@@ -1149,10 +1222,10 @@ cudaError_t addWithCuda(int *NOut, unsigned long long *KernelP, unsigned int siz
 	}
 
 	// Copy output vector from GPU buffer to host memory.
-	cudaStatus = cudaMemcpy(NOut, dev_a, size * sizeof(int), cudaMemcpyDeviceToHost);
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy output failed!");
-	}
+	//cudaStatus = cudaMemcpy(NOut, dev_a, size * sizeof(int), cudaMemcpyDeviceToHost);
+	//if (cudaStatus != cudaSuccess) {
+	//	fprintf(stderr, "cudaMemcpy output failed!");
+	//}
 
 	return cudaStatus;
 }
