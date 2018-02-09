@@ -13,4 +13,4 @@ CPU (1 core of i5-4440 @ 3.1Ghz) - 6,000,000 p/sec<br />
 GeForce GT 710 (366 GFLOPS, 1GB RAM, 512kb L2 cache, 19 Watts) - 845,000 p/sec (with options 4 16) <br />
 GeForce 840M (790 GFLOPS, 2GB RAM, ??kb L2 cache 30 Watts) - ?? p/sec<br />
 GeForce 960M (1403 GFLOPS, 2GB RAM, 2048kb L2 cache, 65 Watts) - ~4,100,000 p/sec (with options 8 16) <br />
-GeForce GTX 1060 (3855 GFLOPS, 6GB RAM, 1536kb L2 cache, 120 Watts) - ~6,000,000 p/sec @56% TDP ~70W (<br /> 
+GeForce GTX 1060 (3855 GFLOPS, 6GB RAM, 1536kb L2 cache, 120 Watts) - ~7,600,000 p/sec @70% TDP ~84W (wth options 8 64) <br /> 
