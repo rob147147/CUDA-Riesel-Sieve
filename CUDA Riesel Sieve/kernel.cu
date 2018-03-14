@@ -32,6 +32,35 @@ unsigned int *dev_j = 0;
 cudaError_t cudaStatus;
 
 
+__device__ __forceinline__ int legendre(unsigned int a, unsigned long long p) {
+	//Work out the legendre symbol for (a/p)
+	//This code is taken straight from the source code of SR2Sieve
+	unsigned int x, y, t;
+	int sign = 1;
+	for (y = a; y % 2 == 0; y /= 2) {
+		if (p % 8 == 3 || p % 8 == 5) {
+			sign = -sign;
+		}
+	}
+	if (p % 4 == 3 && y % 4 == 3) {
+		sign = -sign;
+	}
+	for (x = p%y; x>0; x %= y) {
+		for (; x % 2 == 0; x /= 2) {
+			if (y % 8 == 3 || y % 8 == 5) {
+				sign = -sign;
+			}
+		}
+		//Swap x and y
+		t = x, x = y, y = t;
+		if (x % 4 == 3 && y % 4 == 3) {
+			sign = -sign;
+		}
+	}
+	return sign;
+}
+
+
 __device__  __forceinline__ void xbinGCDnew(unsigned long long a, unsigned long long beta, unsigned long long &u, unsigned long long &v)
 {
 	unsigned long long alpha;
@@ -104,7 +133,7 @@ __device__ __forceinline__ unsigned long long modul64(unsigned long long x, unsi
 __device__ __forceinline__ unsigned long long montmul(unsigned long long abar, unsigned long long bbar, unsigned long long m, unsigned long long mprime) {
 	unsigned long long thi, tlo, tm;
 	//unsigned long long uhi, ulo;
-	unsigned int ov;
+	//unsigned int ov;
 
 	//mulul64(abar, bbar, &thi, &tlo); // t = abar*bbar.
 	thi = __umul64hi(abar, bbar);
@@ -120,17 +149,31 @@ __device__ __forceinline__ unsigned long long montmul(unsigned long long abar, u
 
 
 	//PTX Version 2 - Clobbers less registers - very similar speed.
-	asm(//"{.reg .u64 t1;\n\t"              // temp 64-bit reg t1 = tmmlo
-		"mad.lo.cc.u64 %0, %3, %4, %0;\n\t" //MAD: "tlo = (tm*m) + tlo" and set the carry out 
+	//asm(//"{.reg .u64 t1;\n\t"              // temp 64-bit reg t1 = tmmlo
+	//	"mad.lo.cc.u64 %0, %3, %4, %0;\n\t" //MAD: "tlo = (tm*m) + tlo" and set the carry out 
 		//"add.cc.u64 %0, %0, t1;\n\t" //Add tlo = tlo + tmmlo and set carry out. 
-		"madc.hi.cc.u64 %1, %3, %4, %1;\n\t" //MAD: "thi = hi(tm*m) + thi" use the previous carry and set the carry out
+	//	"madc.hi.cc.u64 %1, %3, %4, %1;\n\t" //MAD: "thi = hi(tm*m) + thi" use the previous carry and set the carry out
 		//"addc.cc.u64 %1, %1, %3;\n\t" //Add thi and tmmhi, use the previous carry and set carry out.
-		"addc.u32 %2, 0, 0;" //This sets ov to 1 if the previous addition overflowed.
+	//	"addc.u32 %2, 0, 0;" //This sets ov to 1 if the previous addition overflowed.
 		//"}"
-		: "=+l"(tlo), "=+l"(thi) "=r"(ov) : "l"(tm), "l"(m)
+	//	: "=+l"(tlo), "=+l"(thi) "=r"(ov) : "l"(tm), "l"(m)
+	//	);
+
+	//PTX Version 3 - Deal with the overflow case in the asm
+	asm(//"{.reg .u64 t1;\n\t"              // temp 64-bit reg t1 = tmmlo
+		"mad.lo.cc.u64 %0, %2, %3, %0;\n\t" //MAD: "tlo = (tm*m) + tlo" and set the carry out 
+											//"add.cc.u64 %0, %0, t1;\n\t" //Add tlo = tlo + tmmlo and set carry out. 
+		"madc.hi.cc.u64 %1, %2, %3, %1;\n\t" //MAD: "thi = hi(tm*m) + thi" use the previous carry and set the carry out
+											 //"addc.cc.u64 %1, %1, %3;\n\t" //Add thi and tmmhi, use the previous carry and set carry out.
+		"addc.u64 %0, 0, 0;\n\t" //This sets ov to 1 if the previous addition overflowed.
+		"mul.lo.u64 %0, %0, %3;\n\t"
+		"sub.u64 %1, %1, %0;"
+							 //"}"
+		: "=+l"(tlo), "=+l"(thi) : "l"(tm), "l"(m)
 		);
 
-	if (ov > 0 || thi >= m) // If u >= m,
+	//if (ov > 0 || thi >= m) // If u >= m,
+	if (thi >= m) // If u >= m,
 		thi = thi - m; // subtract m from u.
 	return thi;
 }
@@ -144,22 +187,24 @@ __device__ __forceinline__ long long binExtEuclid(long long a, long long b) {
 	while (v>0) {
 		if ((u & 1) == 0) {
 			u = u >> 1;
-			if ((r & 1) == 0) {
-				r = r >> 1;
-			}
-			else {
-				r = (r + b) >> 1;
-			}
+			r = (r + ((r & 1)*b)) >> 1;
+			//if ((r & 1) == 0) {
+			//	r = r >> 1;
+			//}
+			//else {
+			//	r = (r + b) >> 1;
+			//}
 		}
 		else {
 			if ((v & 1) == 0) {
 				v = v >> 1;
-				if ((s & 1) == 0) {
-					s = s >> 1;
-				}
-				else {
-					s = (s + b) >> 1;
-				}
+				s = (s + ((s & 1)*b)) >> 1;
+				//if ((s & 1) == 0) {
+				//	s = s >> 1;
+				//}
+				//else {
+				//	s = (s + b) >> 1;
+				//}
 			}
 			else {
 				x = u - v;
@@ -411,8 +456,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 
 	begin = clock();
 	//Compute KernelBase^-m (mod b)
-	unsigned long long c1 = newKB2;
-	c1 = modul64(newKB2, 0, b);
+	unsigned long long c1 = modul64(newKB2, 0, b);
 	modul++;
 
 	//This should be KernelBase^-1 (mod b)
@@ -444,6 +488,9 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 	modul++;
 	unsigned long long beta = 0;
 
+	int leg1;
+	int leg2;
+
 	bool skip = false;
 	int thisk = 0;
 	//The first 3 values of ks contain NMin, NMax and Q now, so start at 3.
@@ -455,93 +502,109 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 		else if (dev_c[k] == -1) {
 			//This isn't a k-value, it proves the k-value is next
 			thisk = dev_c[k+1];
+			//Work out the legendre symbol for this k and current prime p
+			//For even n's we need to check -ck, and for odd primes we need to check -ckb.
+			//As c=-1 for these tests, check k and kb. 
+			//if (printer) {
+			//	printf("thisk was %d\n", thisk);
+			//	printf("base*thisk was %d\n", *Base*thisk);
+			//}
+			leg1 = legendre(thisk, b);
+			leg2 = legendre(*Base*thisk, b);
+			//if (printer) {
+			//	printf("Leg1 was %d\n", leg1);
+			//	printf("Leg2 was %d\n", leg2);
+			//}
 			fixedBeta = modul64(thisk, 0, b);
 			modul++;
 			skip = true;
+
 		}
 		else {
 			int remainder = dev_c[k];
 
-			//Using subsequence k should be updated to be k*b^remainder
-			unsigned long long sB = fixedsB;
-			for (int rem = 0; rem < remainder; rem++) {
-				sB = montmul(sB, KernelBase, b, bprime);
-				montmuls++;
-			}
+			if ((remainder % 2 == 0 && leg1 == 1) || (remainder % 2 == 1 && leg2 == 1)) {
 
-			beta = montmul(fixedBeta, sB, b, bprime);
-			montmuls++;
-
-			for (int t = 0; t < tMin; t++) {
-				beta = montmul(beta, c1, b, bprime);
-				montmuls++;
-			}
-
-			if (printer & k == 0) {
-				printf("We're in that bit that crashes!\n");
-			}
-
-			for (int t = tMin; t < (NMax/m)+1; t++) {
-				giant++;
-
-				//Check if beta is in js
-				hash = beta & mem - 1;
-				//index = hash*N + S;
-
-				//Its possible beta is here, use linear probing to check
-				for (int probe = 0; probe < m; probe++) {
-					avgProbe++;
-					if (probe > maxProbe) {
-						maxProbe = probe;
-					}
-					lookups++;
-					//if (hashKeys[(Sm + hash)] == 0) {
-					if ((bits[S*ints + (hash / 32)] & (1 << (hash & 31))) == 0) {
-						//Beta is not here
-						break;
-					}
-					collisions++;
-
-					if (hashKeys[Sm + hash] == (int)beta) {
-
-						lookups++;
-						//printf("Match in Thread %d, Block %d. t=%d, hash=%d, probe=%d beta=%llu. Output will be %llu | %d*%d^%d-1\n", i, block, t, hash, probe, beta, b, ks[k], outputBase, output);
-
-						//We've found beta
-						//We've had a match
-						//Find the j value
-						unsigned long long jsnew = 1;
-						jsnew = modul64(jsnew, 0, b);
-						modul++;
-						for (int jval = 0; jval < m; jval++) {
-							if (jsnew == beta) {
-								output = t*m + jval;
-								break;
-							}
-							jsnew = montmul(jsnew, newKB, b, bprime);
-							montmuls++;
-						}
-						//printf("Match in Thread %d, Block %d. t=%d, hash=%d, probe=%d beta=%llu. Output will be %llu | %d*%d^%d-1\n", i, block, t, hash, probe, beta, b, ks[k], outputBase, output);
-						break;
-					}
-
-					hash = (hash + ((probe + 1)*(probe + 1))) & (mem - 1);
+				//Using subsequence k should be updated to be k*b^remainder
+				unsigned long long sB = fixedsB;
+				for (int rem = 0; rem < remainder; rem++) {
+					sB = montmul(sB, KernelBase, b, bprime);
+					montmuls++;
 				}
 
-				beta = montmul(beta, c1, b, bprime);
-				countmuls++;
+				beta = montmul(fixedBeta, sB, b, bprime);
 				montmuls++;
-			}
 
-			if (output < NMin) {
-				output = -3;
-			}
-			else if (output > NMax) {
-				output = -4;
-			}
-			else {
-				printf("Output will be %llu | %d*%d^%d-1\n", b, thisk, *Base, (output*Q)+ dev_c[k]);
-				output = -5;
+				for (int t = 0; t < tMin; t++) {
+					beta = montmul(beta, c1, b, bprime);
+					montmuls++;
+				}
+
+				if (printer & k == 0) {
+					printf("We're in that bit that crashes!\n");
+				}
+
+				for (int t = tMin; t < (NMax / m) + 1; t++) {
+					giant++;
+
+					//Check if beta is in js
+					hash = beta & mem - 1;
+					//index = hash*N + S;
+
+					//Its possible beta is here, use linear probing to check
+					for (int probe = 0; probe < m; probe++) {
+						avgProbe++;
+						if (probe > maxProbe) {
+							maxProbe = probe;
+						}
+						lookups++;
+						//if (hashKeys[(Sm + hash)] == 0) {
+						if ((bits[S*ints + (hash / 32)] & (1 << (hash & 31))) == 0) {
+							//Beta is not here
+							break;
+						}
+						collisions++;
+
+						if (hashKeys[Sm + hash] == (int)beta) {
+
+							lookups++;
+							//printf("Match in Thread %d, Block %d. t=%d, hash=%d, probe=%d beta=%llu. Output will be %llu | %d*%d^%d-1\n", i, block, t, hash, probe, beta, b, ks[k], outputBase, output);
+
+							//We've found beta
+							//We've had a match
+							//Find the j value
+							unsigned long long jsnew = modul64(1, 0, b);;
+							modul++;
+							for (int jval = 0; jval < m; jval++) {
+								if (jsnew == beta) {
+									output = t*m + jval;
+									break;
+								}
+								jsnew = montmul(jsnew, newKB, b, bprime);
+								montmuls++;
+							}
+							//printf("Match in Thread %d, Block %d. t=%d, hash=%d, probe=%d beta=%llu. Output will be %llu | %d*%d^%d-1\n", i, block, t, hash, probe, beta, b, ks[k], outputBase, output);
+							break;
+						}
+
+						hash = (hash + ((probe + 1)*(probe + 1))) & (mem - 1);
+					}
+
+					beta = montmul(beta, c1, b, bprime);
+					countmuls++;
+					montmuls++;
+				}
+
+				if (output < NMin) {
+					output = -3;
+				}
+				else if (output > NMax) {
+					output = -4;
+				}
+				else {
+					printf("Output will be %llu | %d*%d^%d-1\n", b, thisk, *Base, (output*Q) + dev_c[k]);
+					output = -5;
+				}
 			}
 		}
 
@@ -833,15 +896,25 @@ int main(int argc, char* argv[])
 
 	//Generate Primes -------------------------------------------------------------------------------------------
 
-	int blockScale = 32; //Default scaling
-	int threadScale = 2; //Default scaling 
+	int blockScale = 16; //Default scaling
+	int threadScale = 4; //Default scaling 
+
+	int scale1 = 1;
+	int scale2 = 1;
 	//Use the input arguments to change blocks and threads. 
 	if (argc == 2) {
 		//Assume only a threadScale - we must check this is a power of 2 at some point
-		threadScale = atoi(argv[1]);
+		if (atoi(argv[1]) > threadScale) {
+			scale1 = atoi(argv[1])/threadScale;
+		}
+		threadScale = atoi(argv[1]); 
 	}
 	if (argc == 3) {
 		//Assume threadScale and then blockScale - - we must check these are both a power of 2 at some point
+		if (atoi(argv[1]) >= threadScale && atoi(argv[2]) >= blockScale) {
+			scale1 = atoi(argv[1]) / threadScale;
+			scale2 = atoi(argv[2]) / blockScale;
+		}
 		threadScale = atoi(argv[1]);
 		blockScale = atoi(argv[2]);
 	}
@@ -851,6 +924,7 @@ int main(int argc, char* argv[])
 	const int arraySize = blocks*threads;
 	const int testArraySize = arraySize * 24;
 	const int hashScaling = 4;
+
 
 	//Use targetHashSize to set up the hash table - int = 32 bits = 4 bytes, so divide by 4
 	//Each thread requires the a hash table, so also divide by arraySize
@@ -878,7 +952,8 @@ int main(int argc, char* argv[])
 
 	//unsigned long long low = 102254819500000L;
 	unsigned long long low = 102297149770000L;
-	unsigned long long high = 102297160000000L;
+	unsigned long long diff = 10000000L;
+	unsigned long long high = low+(diff*scale1*scale2);
 
 	//unsigned long long low = 600000;
 	//unsigned long long high = 10000000;
@@ -917,6 +992,39 @@ int main(int argc, char* argv[])
 	for (int p = 0; p < primeCount; p++) {
 		//cout << smallP[p] << endl;
 	}
+
+	//Use the smallP to test the Legendre function from SR2Sieve
+/*	for (int a = 1; a < 20; a++) {
+		for (int k = 1; k < 20; k++) {
+			int p = smallP[k];
+			//Work out the legendre symbol for (a/p)
+			unsigned int x, y, t;
+			int sign = 1;
+			for (y = a; y % 2 == 0; y /= 2) {
+				if (p % 8 == 3 || p % 8 == 5) {
+					sign = -sign;
+				}
+			}
+			if (p % 4 == 3 && y % 4 == 3) {
+				sign = -sign;
+			}
+			for (x = p%y; x>0; x %= y) {
+				for (; x % 2 == 0; x /= 2) {
+					if (y % 8 == 3 || y % 8 == 5) {
+						sign = -sign;
+					}
+				}
+				//Swap x and y
+				t = x, x = y, y = t;
+				if (x % 4 == 3 && y % 4 == 3) {
+					sign = -sign;
+				}
+			}
+			cout << "a= " << a << ", p= " << p << ", (a/p)= " << sign << endl;
+		}
+	} */
+
+
 
 	//Find the minimum number in [low...high] that is a multiple of primes[i]
 
@@ -1195,6 +1303,7 @@ cudaError_t addWithCuda(int *NOut, unsigned long long *KernelP, unsigned int siz
 	//cudaStream_t stream1;
 	cudaStreamCreate(&stream0);
 	//cudaStreamCreate(&stream1);
+	cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
 	addKernel1 <<<blocks, threads, 0, stream0 >>>(dev_a, dev_b, /*dev_c, */dev_e, dev_f, dev_g, dev_h, dev_i, dev_j);
 	
 	//This uses too much shared memory and kills occupancy. Really we want to use no more than 16 ints per thread (for 64 threads per block)!
