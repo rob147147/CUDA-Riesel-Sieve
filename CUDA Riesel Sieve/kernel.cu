@@ -9,6 +9,7 @@
 
 #include <stdio.h>
 #include <time.h>
+#include <getopt.h>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -790,9 +791,119 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 }
 
 
-//Update this at some point to use getopt
 int main(int argc, char* argv[])
 {
+	//Deal with command line arguments using getopt
+	int inp;
+	int threadScale = 1;
+	int blockScale = 1;
+	char *abcdFile = "sr_745.abcd";
+
+	unsigned long long low = 0;
+	unsigned long long high = 0;
+
+
+	while ((inp = getopt(argc, argv, "b:hi:p:P:t:")) != -1) {
+		switch (inp) {
+		case 'b':
+			//Get the blockScale argument
+			blockScale = strtol(optarg, NULL, 0);
+			break;
+
+		case 'h':
+			//Print the help 
+			cout << endl;
+			cout << "CUDA Riesel Sieve 0.1.0 -- A sieve for multiple sequences of the form k*b^n-1" << endl;
+			cout << endl;
+			cout << "-i FILE  : Read in abcd sieve file called FILE." << endl;
+			cout << "-p P0    : Start sieveing from P0. Must have a corresponding P1." << endl;
+			cout << "-P P1    : Finish sieving at P1. Must have a corresponding P0. If no argument will use a scaled default for testing." << endl;
+			cout << "             If no -p and -P arguments then we will default to 102297149770000 for testing." << endl;
+			cout << "-Q Q     : Override subsequence value Q. Sieve k*b^n-1 as (k*b^d)*(b^Q)^m-1. NOT YET IMPLEMENTED!" << endl;
+			cout << "-b SCALE : Scale the number of CUDA blocks per kernel by the integer argument SCALE." << endl;
+			cout << "-t SCALE : Scale the number of CUDA threads per block by the integer argument SCALE." << endl;
+			cout << "             Note that these no longer require being powers of 2. We use the formula 1<<SCALE to ensure power of 2." << endl;
+			cout << "-h       : Prints this help" << endl;
+			return 0;
+
+		case 'i':
+			//Get the input file argument
+			abcdFile = optarg;
+			//Check this is a valid filename at some point
+			break;
+
+		case 'p':
+			low = strtoull(optarg, NULL, 0);
+			//Check this is large enough at some point. Can we still have problems if it is too small?
+			break;
+			
+		case 'P':
+			high = strtoull(optarg, NULL, 0);
+			break;
+
+		case 't':
+			//Get the threadScale argument
+			threadScale = strtol(optarg, NULL, 0);
+			break;
+
+		default:
+			return 0;
+		
+		}
+	}
+
+	//Have a look at these limits in the future. We probably want to limit them more than this!
+	if (blockScale < 1 || blockScale > 31) {
+		cout << "Bad input parameter : 1 < BlockScale < 32. BlockScale is 1 by default, and should be a positive integer." << endl;
+		return 1;
+	}
+
+	if (threadScale < 1 || threadScale > 31) {
+		cout << "Bad input parameter : 1 < ThreadScale < 32. ThreadScale is 1 by default, and should be a positive integer." << endl;
+		return 1;
+	}
+
+	cout << "Trying to launch with BlockScale = " << blockScale << " and ThreadScale = " << threadScale << endl;
+
+	blockScale = 1 << blockScale-1;
+	threadScale = 1 << threadScale-1;
+
+
+	if (low == 0 && high == 0) {
+		//Parameters were not set on the command line. Use our usual values for testing.
+
+		//unsigned long long low = 600000;
+		//unsigned long long high = 2500000000;
+
+		//unsigned long long low = 6000000000;
+		//unsigned long long high = 6004000000;
+
+		//unsigned long long low = 1000067500000;
+		//unsigned long long high = 1000070000000;
+
+		//unsigned long long low = 1000099000000;
+		//unsigned long long high = 1000100000000;
+
+		//unsigned long long low = 102254819500000L;
+		low = 102297149770000L;
+		unsigned long long diff = 2500000L;
+		high = low + (diff*threadScale*blockScale);
+		//unsigned long long high = 102297160000000L;
+	}
+
+	if (high < low) {
+		cout << "Bad input parameters : P1 < P0. We want to sieve primes p in the range P0 <= p <= P1." << endl;
+		return 1;
+	}
+
+
+	const int blocks = 128 * blockScale;
+	const int threads = 128 * threadScale;
+	const int arraySize = blocks*threads;
+	const int testArraySize = arraySize * 24;
+	const int hashScaling = 2;
+
+
 	const int kb = 1024;
 	const int mb = kb * kb;
 
@@ -800,6 +911,12 @@ int main(int argc, char* argv[])
 
 	int devCount;
 	cudaGetDeviceCount(&devCount);
+
+	if (devCount < 1) {
+		cout << "No CUDA enabled GPU was detected" << endl;
+		return 1;
+	}
+
 	wcout << "CUDA Devices: " << devCount << endl;
 
 	cudaDeviceProp props;
@@ -828,12 +945,21 @@ int main(int argc, char* argv[])
 	}
 	wcout << "Should target a " << targetHashSize / mb << "mb hash table" << endl << endl;
 
+
+	//Use targetHashSize to set up the hash table - int = 32 bits = 4 bytes, so divide by 4
+	//Each thread requires the a hash table, so also divide by arraySize
+	long long longhashTableSize = (((targetHashSize / 4) / arraySize) / hashScaling);
+	int hashTableSize = longhashTableSize;
+	cout << "Each thread should have " << hashTableSize*hashScaling << " buckets, to store " << hashTableSize << " elements. (Density 1/" << hashScaling << ")" << endl;
+
+
+
 	//Read in an ABCD file and parse ----------------------------------------------------------------------------
 	string line;
 	int total = 0;
 	//string abcdFile = "C:\\Users\\Rob\\Documents\\Visual Studio 2015\\Projects\\CPU Sieve\\sr_108.abcd";
 	//string abcdFile = "C:\\Users\\Rob\\Desktop\\TestSieve\\sr_745.abcd";
-	string abcdFile = "sr_745.abcd";
+	//string abcdFile = "sr_745.abcd";
 
 	//First pass through the ABCD file to find the number of k's and max number of n's
 	int count1 = 0; //Number of k's
@@ -1048,42 +1174,6 @@ int main(int argc, char* argv[])
 
 	//Generate Primes -------------------------------------------------------------------------------------------
 
-	int blockScale = 16; //Default scaling
-	int threadScale = 4; //Default scaling 
-
-	int scale1 = 1;
-	int scale2 = 1;
-	//Use the input arguments to change blocks and threads. 
-	if (argc == 2) {
-		//Assume only a threadScale - we must check this is a power of 2 at some point
-		if (atoi(argv[1]) > threadScale) {
-			scale1 = atoi(argv[1])/threadScale;
-		}
-		threadScale = atoi(argv[1]); 
-	}
-	if (argc == 3) {
-		//Assume threadScale and then blockScale - - we must check these are both a power of 2 at some point
-		if (atoi(argv[1]) >= threadScale && atoi(argv[2]) >= blockScale) {
-			scale1 = atoi(argv[1]) / threadScale;
-			scale2 = atoi(argv[2]) / blockScale;
-		}
-		threadScale = atoi(argv[1]);
-		blockScale = atoi(argv[2]);
-	}
-
-	const int blocks = 32 * blockScale;
-	const int threads = 32 * threadScale; //These must multiply to around 65536. Larger and CUDA times out
-	const int arraySize = blocks*threads;
-	const int testArraySize = arraySize * 24;
-	const int hashScaling = 2;
-
-
-	//Use targetHashSize to set up the hash table - int = 32 bits = 4 bytes, so divide by 4
-	//Each thread requires the a hash table, so also divide by arraySize
-	long long longhashTableSize = (((targetHashSize / 4) / arraySize)/hashScaling);
-	int hashTableSize = longhashTableSize;
-	cout << "Each thread should have " << hashTableSize*hashScaling << " buckets, to store " << hashTableSize << " elements. (Density 1/" << hashScaling << ")" << endl;
-
 	unsigned long long *KernelP = (unsigned long long *)malloc(arraySize*sizeof(unsigned long long));
 	int *NOut = (int *)malloc(arraySize*sizeof(int));
 	//int *hashKeys = (int *)malloc(arraySize * hashTableSize * hashScaling * sizeof(int));
@@ -1093,24 +1183,6 @@ int main(int argc, char* argv[])
 
 
 	//Low should be greater than the primes we use below.
-
-	//unsigned long long low = 600000;
-	//unsigned long long high = 2500000000;
-
-	//unsigned long long low = 6000000000;
-	//unsigned long long high = 6004000000;
-
-	//unsigned long long low = 1000067500000;
-	//unsigned long long high = 1000070000000;
-
-	//unsigned long long low = 1000099000000;
-	//unsigned long long high = 1000100000000;
-
-	//unsigned long long low = 102254819500000L;
-	unsigned long long low = 102297149770000L;
-	unsigned long long diff = 10000000L;
-	unsigned long long high = low+(diff*scale1*scale2);
-	//unsigned long long high = 102297160000000L;
 
 
 	unsigned long long startLow = low; //Don't touch this. Used for timing purposes
@@ -1214,7 +1286,7 @@ int main(int argc, char* argv[])
 		goto Error;
 	}
 
-	//cudaStatus = cudaMalloc((void**)&dev_c, (count1 * 2 + minSubs + 3) * sizeof(int));
+	//cudaStatus = cudaMalloc((void**)&dev_c, (count1 * 3 + minSubs + 3) * sizeof(int));
 	//if (cudaStatus != cudaSuccess) {
 	//	fprintf(stderr, "cudaMalloc failed!");
 	//	goto Error;
@@ -1259,10 +1331,10 @@ int main(int argc, char* argv[])
 	//Copy the data to the correct GPU buffers
 
 	//Lets try storing the k values and remainders in constant memory instead
-	cudaStatus = cudaMemcpyToSymbol(dev_c, ks2, (count1 * 2 + minSubs + 3) * sizeof(int));
+	cudaStatus = cudaMemcpyToSymbol(dev_c, ks2, (count1 * 3 + minSubs + 3) * sizeof(int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMemcpy to constant memory failed!");
-		cout << (count1 * 2 + minSubs + 3) * sizeof(int) << "bytes" << endl;
+		cout << (count1 * 3 + minSubs + 3) * sizeof(int) << "bytes" << endl;
 		goto Error;
 	}
 
