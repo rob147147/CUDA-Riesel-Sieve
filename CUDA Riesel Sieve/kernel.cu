@@ -18,7 +18,8 @@
 
 using namespace std;
 
-cudaError_t addWithCuda(int *NOut, unsigned long long *KernelP, unsigned int size, const int blocks, const int threads, int hashElements, int hashDensity);
+void generateGPUPrimes(unsigned long long *KernelP, unsigned long long low, unsigned int *smallP, int testArraySize, int primeCount, int arraySize);
+
 int *dev_a = 0; //NOut
 unsigned long long *dev_b = 0; //KernelP
 //int *dev_c = 0; //kns
@@ -328,8 +329,9 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 		bitArray[ii] = 0;
 	}*/
 
-	int S = (blockIdx.x * blockDim.x) + threadIdx.x; //This is this block ID*threads in a block + threadID
-	int Sm = S*mem;
+	const int S = (blockIdx.x * blockDim.x) + threadIdx.x; //This is this block ID*threads in a block + threadID
+	const int Sm = S*mem;
+	const int Sints = S*ints;
 
 	bool printer = false;
 	if (S == 0) {
@@ -342,7 +344,9 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 	//	bitArray[threadIdx.x * 64 + ii] = 0;
 	//}
 
-	unsigned long long b = KernelP[S];
+	const unsigned long long b = KernelP[S];
+	const unsigned long long oneMS = modul64(1, 0, b);
+
 	int Q = dev_c[2];
 	int NMin = dev_c[0]/Q;
 	int NMax = (dev_c[1]/Q)+1;
@@ -383,7 +387,8 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 
 	//beginModul = clock();
 	unsigned long long KernelBase = modul64(*Base, 0, b);
-	unsigned long long newKB = modul64(1, 0, b);
+	unsigned long long newKB = oneMS;
+
 	//endModul = clock();
 	//time_spent = (endModul - beginModul);
 	//modultime += time_spent;
@@ -399,9 +404,11 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 		//montmuls++;
 	}
 
+	//Save this now so we can use it later. Will save a call to modul
+	unsigned long long c1 = newKB;
+
 	unsigned long long plo = 0;
 	unsigned long long phi = 0;
-
 
 
 	//beginMulul = clock();
@@ -420,7 +427,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 	//modultime += time_spent;
 	//modul++;
 	
-	unsigned long long newKB2 = newKB;
+	//unsigned long long newKB2 = newKB;
 
 	begin = clock();
 
@@ -433,11 +440,11 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 	}
 
 
-	unsigned long long js = 1;
+	unsigned long long js = oneMS;
 
 	//beginModul = clock();
 	//Convert js to montgomery space
-	js = modul64(js, 0, b);
+	//js = modul64(js, 0, b);
 	//Convert newKB back into Montgomery space
 	newKB = modul64(newKB, 0, b);
 	//endModul = clock();
@@ -452,30 +459,33 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 	int lookups = 0;
 	int hash = 0;
 	int firstFree = m; //The first memory cell that doesn't head a linked list
+	int store = 0;
+	int key = 0;
+	int pointer = 0;
 
 	for (int j = 0; j<m; j++) {
 
 		hash = js & (m - 1);
-		int store = js & 0xFFFF0000; //This blanks off the last 16 bits. This will contain our pointer
+		store = js & 0xFFFF0000; //This blanks off the last 16 bits. This will contain our pointer
 
 		//beginLoop = clock();
 
 		//beginInsert = clock();
-		int key = 0;
+
 		//int key = hashKeys[(Sm + hash)];
 		
-		if ((bits[S*ints + (hash / 32)] & (1 << (hash & 31))) == 0) {
+		if ((bits[Sints + (hash / 32)] & (1 << (hash & 31))) == 0) {
 			//if (key == 0) {
 			//This linked list contains nothing yet, so add the element, and a zero pointer
 			key = store;
-			bits[S*ints + (hash / 32)] += 1 << (hash & 31);
+			bits[Sints + (hash / 32)] += 1 << (hash & 31);
 		}
 
 		else {
 			key = hashKeys[(Sm + hash)];
 
 			//This linked list has at least one element in it. Copy the pointer, put that in our data.
-			int pointer = key & 0x0000FFFF; //This removes the top 16 bits which contain the data, just leaves the pointer.
+			pointer = key & 0x0000FFFF; //This removes the top 16 bits which contain the data, just leaves the pointer.
 			key = (key & 0xFFFF0000) + firstFree; //Update the original data with the new pointer to this data
 			
 			//We could gather these up in shared memory and write them out every so often. 
@@ -483,6 +493,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 
 			firstFree++; //Update the location of next free memory cell
 		}
+
 
 		//beginInsert = clock();
 		hashKeys[(Sm + hash)] = key;
@@ -514,10 +525,10 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 
 	begin = clock();
 	//Compute KernelBase^-m (mod b)
-	unsigned long long c1 = modul64(newKB2, 0, b);
-	modul++;
+	//unsigned long long c1 = modul64(newKB2, 0, b);
+	//modul++;
 
-	//This should be KernelBase^-1 (mod b)
+	//c1  should be KernelBase^Q^-1 (mod b) computed earlier
 	//Now repeatedly square it as m is a power of two
 
 	for (int t = 0; t<shift; t++) {
@@ -546,7 +557,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 //	float avgProbe = 0;
 
 	unsigned long long fixedBeta = 0;
-	unsigned long long fixedsB = modul64(1, 0, b);
+	unsigned long long fixedsB = oneMS;
 	modul++;
 	unsigned long long beta = 0;
 
@@ -642,11 +653,12 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 					//montmuls++;
 				}
 
-				if (printer & k == 0) {
-					printf("We're in that bit that crashes!\n");
-				}
+				//if (printer & k == 0) {
+				//	printf("We're in that bit that crashes!\n");
+				//}
 
-				for (int t = tMin; t < (NMax / m) + 1; t++) {
+				int tMax = (NMax >> shift)+1;
+				for (int t = tMin; t < tMax; t++) {
 					giant++;
 
 					//Check if beta is in js
@@ -667,23 +679,23 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 					if (key != 0) {
 					//else {
 						//Its possible beta is here
-						int probe = 1;
+						int probe = 0;
 						int pointer = -1;
 						//int key = 0;
-						while (pointer != 0) {
+						while (true) {
 
 
-							if (pointer == -1) {
+							//if (pointer == -1) {
 								//key = hashKeys[(Sm + hash)];
-							}
-							else {
-								key = hashKeys[(Sm + pointer)];
+							//}
+							//else {
+								//key = hashKeys[(Sm + pointer)];
 								probe++;
 								if (probe > maxProbe) {
 									maxProbe = probe;
 								}
-							}
-							lookups++;
+							//}
+							//lookups++;
 							pointer = key & 0x0000FFFF; //Remove the data, leave the pointer
 							key = key & 0xFFFF0000; //Remove the pointer, leave the data
 
@@ -693,7 +705,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 								//We've had a match
 								//Find the j value
 								//beginModul = clock();
-								unsigned long long jsnew = modul64(1, 0, b);
+								unsigned long long jsnew = oneMS;
 
 								//printf("We've had a potential hit #%d!\n", hits);
 								//hits++;
@@ -704,6 +716,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 								for (int jval = 0; jval < m; jval++) {
 									if (jsnew == beta) {
 										output = t*m + jval;
+										pointer = 0;
 										break;
 									}
 									//beginMont = clock();
@@ -716,6 +729,11 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 								//printf("Match in Thread %d, Block %d. t=%d, hash=%d, probe=%d beta=%llu. Output will be %llu | %d*%d^%d-1\n", i, block, t, hash, probe, beta, b, ks[k], outputBase, output);
 
 							}
+
+							if (pointer == 0) {
+								break;
+							}
+							key = hashKeys[(Sm + pointer)];
 
 						}
 
@@ -1368,110 +1386,23 @@ int main(int argc, char* argv[])
 	//	goto Error;
 	//}
 
+	//Create the first set of primes for the GPU before we start
+	if (low % 2 == 0) {
+		//Make sure low is odd. Go back by one if necessary
+		low = low - 1;
+		cout << "We've reduced low by 1 to make it odd" << endl;
+	}
+
+	cout << "Low is now set to " << low << endl;
+	generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize);
+
 	int kernelCount = 0;
 	clock_t loopTime = clock();
 	//From here we need to loop to keep the GPU busy. 
 	while (low < high) {
-		if (low % 2 == 0) {
-			//Make sure low is odd. Go back by one if necessary
-			low = low - 1;
-			cout << "We've reduced low by 1 to make it odd" << endl;
-		}
+		
 		kernelCount++;
 		cout << "Executing kernel number " << kernelCount << endl;
-		cout << "Low is now set to " << low << endl;
-
-		//A bool is 8 bits. Can we rewrite this to use ints, and make it 8 times more memory efficient?
-
-		begin = clock();
-		//memset(mark, true, testArraySize*sizeof(bool));
-		memset(mark1, 0, ((testArraySize / 32) + 1)*sizeof(unsigned int));
-		unsigned long long diff = 0;
-
-		for (int i = 1; i < primeCount; i++) {
-			unsigned int smallPrime = smallP[i];
-			unsigned long long mod = low % smallPrime;
-			
-			if (mod == 0) {
-				diff = 0;
-			}
-			else {
-				if (mod % 2 == 1) {
-					mod = mod + smallPrime;
-				}
-				mod = mod >> 1;
-				diff = (smallPrime - mod);
-			}
-
-			for (int k = diff; k < testArraySize; k += smallPrime) {
-				//mark[k] = false;
-				//Take k and divide it by 32 to work out which int we are in. Shift by the remainder
-				int intbool = k / 32; //Find the right int
-				int intshift = k & 31; //Work out the shift
-				if (((mark1[intbool] >> (31-intshift)) & 1) == 1) {
-					//Do nothing - this bit is already 1
-				}
-				else {
-					mark1[intbool] += (0x80000000 >> intshift);
-				}
-			}
-
-
-			//for (int j = 0; j < testArraySize; j++) {
-			//	//if (mark[j] == true && (((low + j) % smallP[i]) == 0)) {
-			//	mods++;
-			//	if (((low + j) % smallPrime) == 0) {
-			//		//So if low + offset can be divided by i we've found the first value divisible by i. Now mark off all i multiples
-			//		for (int k = j; k < testArraySize; k += smallPrime) {
-			//			mark[k] = false;
-			//		}
-			//		break;
-			//	}
-			//}
-		}
-		end = clock();
-		time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
-		cout << "Time marking the prime array " << time_spent << "s" << endl;
-
-		//cout << "Mark1[0] = " << mark1[0] << endl;
-
-
-		//Use mark1 to decide if we need to add a prime. We're looking for 1 entries in these ints
-		begin = clock();
-		int countPrimes = 0;
-		for (int i = 0; i < testArraySize; i++) {
-			int intbool = i / 32; //Find the right int
-			int intshift = i & 31; //Work out the shift
-			if (((mark1[intbool] >> (31 - intshift)) & 1) == 0) {
-				KernelP[countPrimes] = 2*i + low;
-				countPrimes++;
-				if (countPrimes == arraySize) {
-					cout << "We got as far as " << i+low << " out of " << low + (testArraySize) << endl;
-					break;
-				}
-			}
-		}
-		end = clock();
-		time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
-		cout << "Time generating kernel primes " << time_spent << "s" << endl;
-
-		// Numbers which are not marked as false are prime
-		//begin = clock();
-		//int countPrimes = 0;
-		//for (unsigned long long i = low; i < low + (testArraySize); i++) {
-		//	if (mark[i - low] == true) {
-		//		KernelP[countPrimes] = i;
-		//		countPrimes++;
-		//		if (countPrimes == arraySize) {
-		//			cout << "We got as far as " << i << " out of " << low + (testArraySize) << endl;
-		//			break;
-		//		}
-		//		//cout << i << endl;
-		//	}
-		//}
-		//end = clock();
-		//time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
-		//cout << "Time generating kernel primes " << time_spent << "s" << endl;
 
 		unsigned long long minPrime = KernelP[0];
 		unsigned long long maxPrime = KernelP[arraySize - 1];
@@ -1480,15 +1411,77 @@ int main(int argc, char* argv[])
 		cout << "Min Prime = " << minPrime << ". Max Prime = " << maxPrime << ". Progress = " << progress << endl;
 		cout << "Array Size = " << arraySize << endl;
 
-		//End of Generating Primes ----------------------------------------------------------------------------------
+		//Set low to the next odd number above maxPrime. The CPU will generate the netx batch of primes while the GPU is working
+		low = maxPrime+2;
+
 
 		begin = clock();
 		cout << "Try to launch the CUDA kernel" << endl;
-		// Add vectors in parallel.
-		//This uses the full ABCD file, but runs very slowly when file is big
-		//cudaError_t cudaStatus = addWithCuda(NOut, KernelP, kns, &base, &count3, arraySize, count3, blocks, threads);
-		//This is datless - remember to change to addkernel1
-		cudaError_t cudaStatus = addWithCuda(NOut, KernelP, arraySize, blocks, threads, hashTableSize, hashScaling);
+
+		// Copy input vectors from host memory to GPU buffers.
+		cudaStatus = cudaMemcpy(dev_b, KernelP, arraySize * sizeof(unsigned long long), cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "cudaMemcpy input failed!");
+		}
+
+		cudaStatus = cudaMemset(dev_g, 0, arraySize * hashTableSize * hashScaling * sizeof(int));
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "cudaMemcpy input failed!");
+		}
+
+		cudaStatus = cudaMemset(dev_j, 0, ((arraySize * hashTableSize) / 32) * sizeof(unsigned int));
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "cudaMemcpy input failed!");
+		}
+
+
+		//cudaEvent_t start, stop;
+		//cudaEventCreate(&start);
+		//cudaEventCreate(&stop);
+		// Launch a kernel on the GPU with one thread for each element.
+		//cudaEventRecord(start);
+		cudaStream_t stream0;
+		//cudaStream_t stream1;
+		cudaStreamCreate(&stream0);
+		//cudaStreamCreate(&stream1);
+		cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
+		addKernel1 << <blocks, threads, 0, stream0 >> >(dev_a, dev_b, /*dev_c, */dev_e, dev_f, dev_g, dev_h, dev_i, dev_j);
+
+		//This uses too much shared memory and kills occupancy. Really we want to use no more than 16 ints per thread (for 64 threads per block)!
+		//addKernel1 << <blocks, threads, ((threads*hashElements*hashDensity) / 32)*sizeof(int), stream0 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h, dev_i);
+
+		//addKernel1<<<blocks,threads,0,stream1>>>(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h);
+		//cudaEventRecord(stop);
+
+		//cudaEventSynchronize(stop);
+		//float milliseconds = 0;
+		//cudaEventElapsedTime(&milliseconds, start, stop);
+		//printf("Time taken: %f ms \n", milliseconds);
+
+		// Check for any errors launching the kernel
+		//cudaStatus = cudaGetLastError();
+		//if (cudaStatus != cudaSuccess) {
+		//    fprintf(stderr, "addKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
+		//}
+
+		//We should try to generate the next array of primes in here!
+		generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize);
+
+
+		// cudaDeviceSynchronize waits for the kernel to finish, and returns
+		// any errors encountered during the launch.
+		cudaStatus = cudaDeviceSynchronize();
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
+		}
+
+		// Copy output vector from GPU buffer to host memory.
+		cudaStatus = cudaMemcpy(NOut, dev_a, arraySize * sizeof(int), cudaMemcpyDeviceToHost);
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "cudaMemcpy output failed!");
+		}
+		
+		
 		if (cudaStatus != cudaSuccess) {
 			fprintf(stderr, "addWithCuda failed!");
 			return 1;
@@ -1500,15 +1493,13 @@ int main(int argc, char* argv[])
 		printf("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n\n",
 			NOut[0], NOut[1], NOut[2], NOut[3], NOut[4], NOut[5], NOut[6], NOut[7], NOut[8], NOut[9]);
 
-		//Set low equal to high and continue in the loop
-		low = maxPrime;
 	}
 
 	clock_t loopEnd = clock();
 	time_spent = (double)(loopEnd - loopTime) / CLOCKS_PER_SEC;
 	cout << "Time taken " << time_spent << "s" << endl;
 	cout << "Time per kernel " << time_spent / kernelCount << endl;
-	cout << "Progress = " << KernelP[arraySize - 1] - startLow << " at " << (KernelP[arraySize - 1] - startLow) / time_spent << " p/sec" << endl << endl;
+	cout << "Progress = " << (low-2) - startLow << " at " << ((low-2) - startLow) / time_spent << " p/sec" << endl << endl;
 
 	//Reprint the CUDA info
 	wcout << "CUDA version:   v" << CUDART_VERSION << endl;
@@ -1540,7 +1531,8 @@ Error:
 	cudaFree(dev_e);
 	cudaFree(dev_f);
 	cudaFree(dev_g);
-
+	cudaFree(dev_h);
+	cudaFree(dev_i);
 	cudaFree(dev_j);
 	return cudaStatus;
 
@@ -1555,69 +1547,64 @@ Error:
 	return 0;
 }
 
-// Helper function for using CUDA to add vectors in parallel.
-cudaError_t addWithCuda(int *NOut, unsigned long long *KernelP, unsigned int size, const int blocks, const int threads, int hashElements, int hashDensity)
-{
+void generateGPUPrimes(unsigned long long *KernelP, unsigned long long low, unsigned int *smallP, int testArraySize, int primeCount, int arraySize) {
+	clock_t begin = clock();
+	unsigned int *mark1 = (unsigned int *)malloc(((testArraySize / 32) + 1)*sizeof(unsigned int));
+	memset(mark1, 0, ((testArraySize / 32) + 1)*sizeof(unsigned int));
+	unsigned int diff = 0;
 
-	// Copy input vectors from host memory to GPU buffers.
-	cudaStatus = cudaMemcpy(dev_b, KernelP, size * sizeof(unsigned long long), cudaMemcpyHostToDevice);
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy input failed!");
+	for (int i = 1; i < primeCount; i++) {
+		unsigned int smallPrime = smallP[i];
+		unsigned int mod = low % smallPrime;
+
+		if (mod == 0) {
+			diff = 0;
+		}
+		else {
+			if (mod % 2 == 1) {
+				mod = mod + smallPrime;
+			}
+			mod = mod >> 1;
+			diff = (smallPrime - mod);
+		}
+
+		for (int k = diff; k < testArraySize; k += smallPrime) {
+			//mark[k] = false;
+			//Take k and divide it by 32 to work out which int we are in. Shift by the remainder
+			int intbool = k / 32; //Find the right int
+			int intshift = k & 31; //Work out the shift
+			if (((mark1[intbool] >> (31 - intshift)) & 1) == 1) {
+				//Do nothing - this bit is already 1
+			}
+			else {
+				mark1[intbool] += (0x80000000 >> intshift);
+			}
+		}
+
 	}
 
-	cudaStatus = cudaMemset(dev_g, 0, size * hashElements * hashDensity * sizeof(int));
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy input failed!");
+	clock_t end = clock();
+	double time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+	cout << "Time marking the prime array " << time_spent << "s" << endl;
+
+	begin = clock();
+	//Use mark1 to decide if we need to add a prime. We're looking for 1 entries in these ints
+	int countPrimes = 0;
+	for (int i = 0; i < testArraySize; i++) {
+		int intbool = i / 32; //Find the right int
+		int intshift = i & 31; //Work out the shift
+		if (((mark1[intbool] >> (31 - intshift)) & 1) == 0) {
+			KernelP[countPrimes] = 2 * i + low;
+			countPrimes++;
+			if (countPrimes == arraySize) {
+				cout << "We got as far as " << i + low << " out of " << low + (testArraySize) << endl;
+				break;
+			}
+		}
 	}
 
-	cudaStatus = cudaMemset(dev_j, 0, ((size * hashElements) / 32) * sizeof(unsigned int));
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy input failed!");
-	}
+	end = clock();
+	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+	cout << "Time generating kernel primes " << time_spent << "s" << endl;
 
-
-	//cudaEvent_t start, stop;
-	//cudaEventCreate(&start);
-	//cudaEventCreate(&stop);
-	// Launch a kernel on the GPU with one thread for each element.
-	//cudaEventRecord(start);
-	cudaStream_t stream0;
-	//cudaStream_t stream1;
-	cudaStreamCreate(&stream0);
-	//cudaStreamCreate(&stream1);
-	cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
-	addKernel1 <<<blocks, threads, 0, stream0 >>>(dev_a, dev_b, /*dev_c, */dev_e, dev_f, dev_g, dev_h, dev_i, dev_j);
-	
-	//This uses too much shared memory and kills occupancy. Really we want to use no more than 16 ints per thread (for 64 threads per block)!
-	//addKernel1 << <blocks, threads, ((threads*hashElements*hashDensity) / 32)*sizeof(int), stream0 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h, dev_i);
-
-	//addKernel1<<<blocks,threads,0,stream1>>>(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h);
-	//cudaEventRecord(stop);
-
-	//cudaEventSynchronize(stop);
-	//float milliseconds = 0;
-	//cudaEventElapsedTime(&milliseconds, start, stop);
-	//printf("Time taken: %f ms \n", milliseconds);
-
-	// Check for any errors launching the kernel
-	//cudaStatus = cudaGetLastError();
-	//if (cudaStatus != cudaSuccess) {
-	//    fprintf(stderr, "addKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
-	//}
-
-	// cudaDeviceSynchronize waits for the kernel to finish, and returns
-	// any errors encountered during the launch.
-	cudaStatus = cudaDeviceSynchronize();
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
-	}
-
-	// Copy output vector from GPU buffer to host memory.
-	cudaStatus = cudaMemcpy(NOut, dev_a, size * sizeof(int), cudaMemcpyDeviceToHost);
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy output failed!");
-	}
-
-	return cudaStatus;
 }
-
