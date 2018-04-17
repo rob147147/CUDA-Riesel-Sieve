@@ -22,8 +22,8 @@ void generateGPUPrimes(unsigned long long *KernelP, unsigned long long low, unsi
 
 int *dev_a = 0; //NOut
 unsigned long long *dev_b = 0; //KernelP
-//int *dev_c = 0; //kns
-__constant__ int dev_c[512];
+int *dev_c = 0; //kns
+//__constant__ int dev_c[512];
 int *dev_e; //Base
 int *dev_f; //counterIn
 int *dev_g = 0; //HashTable Keys
@@ -66,11 +66,12 @@ __device__ __forceinline__ int legendre(unsigned int a, unsigned long long p) {
 }
 
 
-__device__  __forceinline__ void xbinGCDnew(unsigned long long a, unsigned long long beta, unsigned long long &u, unsigned long long &v)
+__device__  __forceinline__ void xbinGCDnew(unsigned long long beta, unsigned long long &u, unsigned long long &v)
 {
-	unsigned long long alpha;
-	u = 1; v = 0;
-	alpha = a;
+	unsigned long long alpha = 9223372036854775808;
+	unsigned long long a = 9223372036854775808;
+	//u = 1; v = 0;
+	//alpha = a;
 	// Note that alpha is
 	// even and beta is odd.
 	// The invariant maintained from here on is: 2a = u*2*alpha - v*beta.
@@ -271,7 +272,7 @@ __device__ __forceinline__ long long binExtEuclid(long long a, long long b) {
 
 
 
-__global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ int *Base, int *counterIn, int *hashKeys, int *hashElements, int *hashDensity, unsigned int *bits)
+__global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *ks, int *Base, int *counterIn, int *hashKeys, int *hashElements, int *hashDensity, unsigned int *bits)
 {
 	clock_t beginfull = clock();
 	clock_t begin = clock();
@@ -347,12 +348,12 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 	const unsigned long long b = KernelP[S];
 	const unsigned long long oneMS = modul64(1, 0, b);
 
-	int Q = dev_c[2];
-	int NMin = dev_c[0]/Q;
-	int NMax = (dev_c[1]/Q)+1;
+	int Q = ks[2];
+	int NMin = ks[0]/Q;
+	int NMax = (ks[1]/Q)+1;
 
 	unsigned long long bprime = 0;
-	unsigned long long rInv = 0;
+	unsigned long long rInv = 1;
 	
 	int montmuls = 0;
 	int montmuls1 = 0;
@@ -375,7 +376,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 
 	begin = clock();
 
-	xbinGCDnew(9223372036854775808, b, rInv, bprime);
+	xbinGCDnew(b, rInv, bprime);
 
 	end = clock();
 	time_spent = (end - begin);
@@ -557,9 +558,16 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 //	float avgProbe = 0;
 
 	unsigned long long fixedBeta = 0;
-	unsigned long long fixedsB = oneMS;
-	modul++;
-	unsigned long long beta = 0;
+	unsigned long long beta = oneMS;
+
+	for (int t = 0; t < tMin; t++) {
+		//beginMont = clock();
+		beta = montmul(beta, c1, b, bprime);
+		//endMont = clock();
+		//time_spent = (endMont - beginMont);
+		//montmultime += time_spent;
+		//montmuls++;
+	}
 
 	int leg1;
 	int leg2;
@@ -567,20 +575,19 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 
 	//int hits = 0;
 
-	bool skip = false;
 	int thisk = 0;
 	int corek = 0;
+
 	//The first 3 values of ks contain NMin, NMax and Q now, so start at 3.
 	for (int k = 3; k < *counterIn; k++) {
-		if (skip) {
-			skip = false;
-		}
 
-		else if (dev_c[k] == -1) {
+		if (ks[k] == -1) {
 			//This isn't a k-value, it proves the k-value is next, and its core is after that
-			thisk = dev_c[k + 1];
-			corek = dev_c[k + 2];
 			k++;
+			thisk = ks[k];
+			k++;
+			corek = ks[k];
+			//k++;
 			//Work out the legendre symbol for this k and current prime p
 			//For even n's we need to check -ck, and for odd primes we need to check -ckb.
 			//As c=-1 for these tests, check k and kb. 
@@ -613,20 +620,21 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 
 			//beginModul = clock();
 			fixedBeta = modul64(thisk, 0, b);
+			fixedBeta = montmul(fixedBeta, beta, b, bprime);
 			//endModul = clock();
 			//time_spent = (endModul - beginModul);
 			//modultime += time_spent;
 			//modul++;
-			skip = true;
+			//skip = true;
 
 		}
 		else {
-			int remainder = dev_c[k];
+			int remainder = ks[k];
 
 			if ((remainder % 2 == 0 && leg1 == 1) || (remainder % 2 == 1 && leg2 == 1)) {
 
 				//Using subsequence k should be updated to be k*b^remainder
-				unsigned long long sB = fixedsB;
+				unsigned long long sB = fixedBeta;
 				for (int rem = 0; rem < remainder; rem++) {
 					//beginMont = clock();
 					sB = montmul(sB, KernelBase, b, bprime);
@@ -637,21 +645,21 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 				}
 
 				//beginMont = clock();
-				beta = montmul(fixedBeta, sB, b, bprime);
+				//sB = montmul(fixedBeta, sB, b, bprime);
 				//endMont = clock();
 				//time_spent = (endMont - beginMont);
 				//montmultime += time_spent;
 				//montmuls++;
 				//montmuls++;
 
-				for (int t = 0; t < tMin; t++) {
+				//for (int t = 0; t < tMin; t++) {
 					//beginMont = clock();
-					beta = montmul(beta, c1, b, bprime);
+				//	beta = montmul(beta, c1, b, bprime);
 					//endMont = clock();
 					//time_spent = (endMont - beginMont);
 					//montmultime += time_spent;
 					//montmuls++;
-				}
+				//}
 
 				//if (printer & k == 0) {
 				//	printf("We're in that bit that crashes!\n");
@@ -662,18 +670,21 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 					giant++;
 
 					//Check if beta is in js
-					hash = beta & (m - 1);
+					hash = sB & (m - 1);
 					//index = hash*N + S;
 
 					//This was quicker with the bit array in the past - it now appears to be faster without using the bit array
 					int key = hashKeys[(Sm + hash)];
+					lookups++;
 
 					//if ((bits[S*ints + (hash / 32)] & (1 << (hash & 31))) == 0) {
 					//if (key == 0) {
 					//	lookups++;
 					//	zerohash++;
 						//Beta is not here
-
+						//if (b == 102297149781479 && thisk == 18300) {
+							//printf("Key was 0 when t = %d and rem = %d\n", t,remainder);
+						//}
 					//}
 
 					if (key != 0) {
@@ -695,11 +706,11 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 									maxProbe = probe;
 								}
 							//}
-							//lookups++;
+							
 							pointer = key & 0x0000FFFF; //Remove the data, leave the pointer
 							key = key & 0xFFFF0000; //Remove the pointer, leave the data
 
-							if (((int)beta & 0xFFFF0000) == key) {
+							if (((int)sB & 0xFFFF0000) == key) {
 								//Likely had a hit
 								//We've found beta
 								//We've had a match
@@ -708,13 +719,13 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 								unsigned long long jsnew = oneMS;
 
 								//printf("We've had a potential hit #%d!\n", hits);
-								//hits++;
+								//hits = hits+1;
 								//endModul = clock();
 								//time_spent = (endModul - beginModul);
 								//modultime += time_spent;
 								//modul++;
 								for (int jval = 0; jval < m; jval++) {
-									if (jsnew == beta) {
+									if (jsnew == sB) {
 										output = t*m + jval;
 										pointer = 0;
 										break;
@@ -726,13 +737,14 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 									//montmultime += time_spent;
 									//montmuls++;
 								}
-								//printf("Match in Thread %d, Block %d. t=%d, hash=%d, probe=%d beta=%llu. Output will be %llu | %d*%d^%d-1\n", i, block, t, hash, probe, beta, b, ks[k], outputBase, output);
+								//printf("Match in S %d. t=%d, hash=%d, probe=%d beta=%llu rem=%d. Output will be %llu | %d*%d^%d-1\n", S, t, hash, probe, beta, remainder, b, thisk, *Base, ((output*Q) + remainder));
 
 							}
 
 							if (pointer == 0) {
 								break;
 							}
+							lookups++;
 							key = hashKeys[(Sm + pointer)];
 
 						}
@@ -740,7 +752,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, /*int *ks,*/ 
 					}
 
 					//beginMont = clock();
-					beta = montmul(beta, c1, b, bprime);
+					sB = montmul(sB, c1, b, bprime);
 					//endMont = clock();
 					//time_spent = (endMont - beginMont);
 					//montmultime += time_spent;
@@ -1304,11 +1316,11 @@ int main(int argc, char* argv[])
 		goto Error;
 	}
 
-	//cudaStatus = cudaMalloc((void**)&dev_c, (count1 * 3 + minSubs + 3) * sizeof(int));
-	//if (cudaStatus != cudaSuccess) {
-	//	fprintf(stderr, "cudaMalloc failed!");
-	//	goto Error;
-	//}
+	cudaStatus = cudaMalloc((void**)&dev_c, (count1 * 3 + minSubs + 3) * sizeof(int));
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaMalloc failed!");
+		goto Error;
+	}
 
 	cudaStatus = cudaMalloc((void**)&dev_e, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
@@ -1349,9 +1361,15 @@ int main(int argc, char* argv[])
 	//Copy the data to the correct GPU buffers
 
 	//Lets try storing the k values and remainders in constant memory instead
-	cudaStatus = cudaMemcpyToSymbol(dev_c, ks2, (count1 * 3 + minSubs + 3) * sizeof(int));
+	//cudaStatus = cudaMemcpyToSymbol(dev_c, ks2, (count1 * 3 + minSubs + 3) * sizeof(int));
+	//if (cudaStatus != cudaSuccess) {
+	//	fprintf(stderr, "cudaMemcpy to constant memory failed!");
+	//	cout << (count1 * 3 + minSubs + 3) * sizeof(int) << "bytes" << endl;
+	//	goto Error;
+	//}
+	cudaStatus = cudaMemcpy(dev_c, ks2, (count1 * 3 + minSubs + 3) * sizeof(int), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy to constant memory failed!");
+		//fprintf(stderr, "cudaMemcpy to constant memory failed!");
 		cout << (count1 * 3 + minSubs + 3) * sizeof(int) << "bytes" << endl;
 		goto Error;
 	}
@@ -1445,7 +1463,7 @@ int main(int argc, char* argv[])
 		cudaStreamCreate(&stream0);
 		//cudaStreamCreate(&stream1);
 		cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
-		addKernel1 << <blocks, threads, 0, stream0 >> >(dev_a, dev_b, /*dev_c, */dev_e, dev_f, dev_g, dev_h, dev_i, dev_j);
+		addKernel1 << <blocks, threads, 0, stream0 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h, dev_i, dev_j);
 
 		//This uses too much shared memory and kills occupancy. Really we want to use no more than 16 ints per thread (for 64 threads per block)!
 		//addKernel1 << <blocks, threads, ((threads*hashElements*hashDensity) / 32)*sizeof(int), stream0 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h, dev_i);
