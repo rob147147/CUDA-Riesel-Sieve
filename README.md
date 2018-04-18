@@ -1,4 +1,4 @@
-This is a sieve for eliminating non-primes of the form k*b^n-1, typically searched by the Conjectures R'Us (CRUS) project over at mersenneforum.org.
+This is a sieve for eliminating non-primes of the form k*b^n-1, typically searched by the Conjectures 'R Us (CRUS) project over at mersenneforum.org.
 
 The CPU is responsible for reading in ABCD files and generating arrays of prime numbers to send to the GPU.<br />
 The GPU takes an array of prime numbers which may be prime factors of numbers of the form k*b^n-1. The GPU is also given a list of k-values and the n-min and n-max value from the ABCD file. 
