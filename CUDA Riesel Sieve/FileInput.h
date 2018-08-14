@@ -1,0 +1,1 @@
+void countKs(char *abcdFile, int &count1, int &count3);
