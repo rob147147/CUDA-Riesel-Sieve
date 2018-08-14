@@ -11,7 +11,7 @@ The test file is R745.ABCD which contains 22 k-values, with n-min = 180,000 and 
 <br />
 CPU (1 core of i5-4440 @ 3.1Ghz, using SR2Sieve) - 6,000,000 p/sec<br />
 GeForce GT 710 (366 GFLOPS, 1GB RAM, 512kb L2 cache, 19 Watts) - 1,700,000 p/sec (with params -b 4) <br />
-GeForce 960M (1403 GFLOPS, 2GB RAM, 2048kb L2 cache, 65 Watts) - ~7,700,000 p/sec (with params -b 5) <br />
+GeForce 960M (1403 GFLOPS, 2GB RAM, 2048kb L2 cache, 65 Watts) - ~11,125,000 p/sec (with params -b 6 -m 7) <br />
 GeForce GTX 1060 (3855 GFLOPS, 6GB RAM, 1536kb L2 cache, 120 Watts) - ~11,700,000 p/sec @60% TDP ~72W (wth params -b 7) <br /> 
 
 NVidia MX150 (1177 GFLOPS, 2GB RAM, 512kb L2 cache 25 Watts) - 6,000,000 p/sec (with params -b 5(6) -m 5)<br />
