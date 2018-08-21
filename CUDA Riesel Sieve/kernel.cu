@@ -26,7 +26,7 @@ int *dev_a = 0; //NOut
 unsigned long long *dev_b = 0; //KernelP
 int *dev_c = 0; //kns
 				//__constant__ int dev_c[512];
-int *dev_e; //Base
+__constant__ int base[1]; //Base
 int *dev_f; //counterIn
 int *dev_g = 0; //HashTable Keys
 int *dev_h = 0; //HashTableElements
@@ -161,7 +161,7 @@ __device__ __forceinline__ unsigned long long modul64(unsigned long long x, unsi
 	return x; // Quotient is y.
 }
 
-__device__ unsigned long long montmul(unsigned long long abar, unsigned long long bbar, unsigned long long m, unsigned long long mprime) {
+__device__ unsigned long long montmul64(unsigned long long abar, unsigned long long bbar, unsigned long long m, unsigned long long mprime) {
 
 	//Its possible we don't need the checks for overflow in the asm and at the end of the method. No test cases have revealed missed factors if those checks are removed
 
@@ -170,13 +170,13 @@ __device__ unsigned long long montmul(unsigned long long abar, unsigned long lon
 	//unsigned int ov;
 
 	//mulul64(abar, bbar, &thi, &tlo); // t = abar*bbar.
-	thi = __umul64hi(abar, bbar);
-	tlo = abar * bbar;
+	//thi = __umul64hi(abar, bbar);
+	//tlo = abar * bbar;
 	/* Now compute u = (t + ((t*mprime) & mask)*m) >> 64.
 	The mask is fixed at 2**64-1. Because it is a 64-bit
 	quantity, it suffices to compute the low-order 64
 	bits of t*mprime, which means we can ignore thi. */
-	tm = tlo * mprime;
+	//tm = tlo * mprime;
 	//mulul64(tm, m, &tmmhi, &tmmlo); // tmm = tm*m.
 	//tmmhi = __umul64hi(tm, m);
 	//tmmlo = tm*m;
@@ -194,22 +194,93 @@ __device__ unsigned long long montmul(unsigned long long abar, unsigned long lon
 	//	);
 
 	//PTX Version 3 - Deal with the overflow case in the asm
-	asm("mad.lo.cc.u64 %0, %2, %3, %0;\n\t" //MAD: "tlo = (tm*m) + tlo" and set the carry out 
+	asm("mul.lo.u64 %0, %4, %5;\n\t" //tlo = abar * bbar
+		"mul.hi.u64 %1, %4, %5;\n\t" //thi = __umul64hi(abar, bbar);
+		"mul.lo.u64 %2, %0, %6;\n\t" //tm = tlo *mprime
+		"mad.lo.cc.u64 %0, %2, %3, %0;\n\t" //MAD: "tlo = (tm*m) + tlo" and set the carry out 
 		"madc.hi.cc.u64 %1, %2, %3, %1;\n\t" //MAD: "thi = hi(tm*m) + thi" use the previous carry and set the carry out
-		"addc.u64 %0, 0, 0;" //This sets ov to 1 if the previous addition overflowed. We're using tlo as ov, as we don't need it anymore
+		"addc.u64 %2, 0, 0;" //This sets ov to 1 if the previous addition overflowed. We're using tlo as ov, as we don't need it anymore
 		//"mul.lo.u64 %0, %0, %3;\n\t" //Multiply m by ov. If ov was 0, this will be 0, else if ov was 1, this will be m
 		//"sub.u64 %1, %1, %0;" //Subtract m from thi (if we overflowed)
 							  //"sub.cc.u64 %1, %1, %3;\n\t" //Subtract m from thi (to make sure thi is bigger than m). If borrow flag is set, them add m back on
 							  //"addc.u64 %0, 0, 0;" //Add the borrow flag to ov
 							  //"mad.lo.u64 %1, %0, %3, %1;"
-		: "=+l"(tlo), "=+l"(thi) : "l"(tm), "l"(m)
+		: "=+l"(tlo), "=+l"(thi), "=+l"(tm) : "l"(m), "l"(abar), "l"(bbar), "l"(mprime)
 	);
 
-	if (tlo > 0 || thi >= m) { // If u >= m,
+	if (tm > 0 || thi >= m) { // If u >= m,
 	//if (thi >= m) {// If u >= m,
 		thi = thi - m; // subtract m from u.
 	}
 	return thi;
+}
+
+__device__ unsigned long long montmul(unsigned long long abar, unsigned long long bbar, unsigned int mlo, unsigned int mhi, unsigned int mprimelo, unsigned int mprimehi) {
+
+	//Take the 64 bit inputs, but do all multiplies in 32 bit chunks
+	unsigned int alo = (unsigned int)abar;
+	unsigned int ahi = (unsigned int)(abar >> 32);
+	unsigned int blo = (unsigned int)bbar;
+	unsigned int bhi = (unsigned int)(bbar >> 32);
+
+	unsigned int u0 = 0;
+	unsigned int u1 = 0;
+	unsigned int u2 = 0;
+	unsigned int u3 = 0;
+
+	unsigned int tm0 = 0;
+	unsigned int tm1 = 0;
+
+	//We need to calculate all 128 bits of t = abar * bbar. Add straight to u
+	//PTX Version 1
+	asm("mul.hi.u32 %1, %6, %8;\n\t" //Bits 32-64 (u1)
+		"mul.lo.u32 %2, %7, %9;\n\t" //Bits 65-96 (u2)
+		"mul.lo.u32 %0, %6, %8; \n\t" //Lowest 32 bits of u (u0)
+		"mad.lo.cc.u32 %1, %6, %9, %1;\n\t" //Add the crossproduct to u1. Set the carry out
+		"madc.hi.cc.u32 %2, %6, %9, %2;\n\t" //Add the crossproduct to u2. Set the carry out, and use the carry in
+		"madc.hi.u32 %3, %7, %9, %3;\n\t" //Bits 97-128 plus any carry out (u3)
+		"mad.lo.cc.u32 %1, %7, %8, %1;\n\t" //Add the other crossproduct to u1. Set the carry out
+		"madc.hi.cc.u32 %2, %7, %8, %2;\n\t" //Add the other crossproduct to u2. Set the carry out, and use the carry in
+		"addc.u32 %3, %3, 0;\n\t" //Add the potential carry into u3
+
+	//Now we calculate t*mprime & mask. I.e. the low 64 bits
+		"mul.hi.u32 %5, %0, %12;\n\t" //tm1
+		"mul.lo.u32 %4, %0, %12;\n\t" //tm0 = lo part of u0*mprimelo
+		"mad.lo.u32 %5, %0, %13, %5;\n\t" //Add the lo part of the crossproduct to tm1. u0*mprimehi
+		"mad.lo.u32 %5, %1, %12, %5;\n\t" //Add the lo part of the other crossproduct to tm1 u1*mprimelo
+
+	//Multiple tm*m to get the 128 bit product, and add it to u
+		"mad.lo.cc.u32 %0, %4, %10, %0;\n\t" //Add the lo part of tm.lo*m*lo to u0. Set the carry out
+		"madc.hi.cc.u32 %1, %4, %10, %1;\n\t" //Add the hi part of tm.lo*m*lo to u1. Set the carry out, and use the carry in
+		"madc.lo.cc.u32 %2, %5, %11, %2;\n\t" //Add the lo part of tm.hi*m*hi to u2. Set the carry out, and use the carry in
+		"madc.hi.cc.u32 %3, %5, %11, %3;\n\t" //Add the hi part of tm.hi*m*hi to u3. Use the carry in, and set carry out for overflow detection
+		"addc.u32 %0, 0, 0;\n\t" //Put the overflow flag into u0
+		"mad.lo.cc.u32 %1, %4, %11, %1;\n\t" //Add the lo part of tm.lo*m*hi to u1. Set the carry out
+		"madc.hi.cc.u32 %2, %4, %11, %2;\n\t" //Add the hi part of tm.lo*m*hi to u2. Set the carry out, and use the carry in
+		"addc.cc.u32 %3, %3, 0;\n\t" //Add the potential carry into u3
+		"addc.u32 %0, %0, 0;\n\t" //Put the overflow flag into u0
+		"mad.lo.cc.u32 %1, %5, %10, %1;\n\t" //Add the lo part of tm.hi*m*lo to u1. Set the carry out
+		"madc.hi.cc.u32 %2, %5, %10, %2;\n\t" //Add the hi part of tm.hi*m*lo to u2. Set the carry out, and use the carry in
+		"addc.cc.u32 %3, %3, 0\n\t;" //Add the potential carry into u3
+		"addc.u32 %0, %0, 0;" //Put the overflow flag into u0
+
+		: "=+r"(u0), "=+r"(u1), "=+r"(u2), "=+r"(u3), "=+r"(tm0), "=+r"(tm1) : "r"(alo), "r"(ahi), "r"(blo), "r"(bhi), "r"(mlo), "r"(mhi), "r"(mprimelo), "r"(mprimehi)
+	);
+
+	//We're only interested in u2 and u3
+	unsigned long long u = u3;
+	u = u << 32;
+	u = u | u2;
+
+	unsigned long long m = mhi;
+	m = m << 32;
+	m = m | mlo;
+
+	if (u0 > 0 || u >= m) {
+		u = u - m;
+	}
+	return u;
+
 }
 
 __device__ __forceinline__ long long binExtEuclid(long long a, long long b) {
@@ -270,7 +341,7 @@ __device__ __forceinline__ long long binExtEuclid(long long a, long long b) {
 
 
 
-__global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix, int *Base, int *rowOffset, int *hashKeys, int *hashElements, int *hashDensity, unsigned int *bits, int *Q, int *minSubs)
+__global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix, int *rowOffset, int *hashKeys, int *hashElements, int *hashDensity, unsigned int *bits, int *Q, int *minSubs)
 {
 	clock_t beginfull = clock();
 	clock_t begin = clock();
@@ -312,7 +383,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	clock_t end = clock();
 	int time_spent = (end - begin);
 	if (printer) {
-		printf("KernelBase = %d\n", *Base);
+		printf("KernelBase = %d\n", base[0]);
 		printf("HashTableElements = %d. %d at 1/%d density.\n", mem, m, *hashDensity);
 		//printf("Each Thread should use %d ints in its bit array.\n", ints);
 		printf("Q = %d.\n", *Q);
@@ -332,7 +403,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	}
 
 	//beginModul = clock();
-	unsigned long long KernelBase = modul64(*Base, 0, b);
+	unsigned long long KernelBase = modul64(base[0], 0, b);
 	unsigned long long newKB = oneMS;
 
 	//endModul = clock();
@@ -340,10 +411,15 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	//modultime += time_spent;
 	//modul = modul + 2;
 
+	unsigned int mlo = (unsigned int)b;
+	unsigned int mhi = (unsigned int)(b >> 32);
+	unsigned int mprimelo = (unsigned int)bprime;
+	unsigned int mprimehi = (unsigned int)(bprime >> 32);
+
 	//We now deal with b^Q for subsequences. 
 	for (int qq = 0; qq < *Q; qq++) {
 		//beginMont = clock();
-		newKB = montmul(KernelBase, newKB, b, bprime);
+		newKB = montmul(KernelBase, newKB, mlo, mhi, mprimelo, mprimehi);
 		//endMont = clock();
 		//time_spent = (endMont - beginMont);
 		//montmultime += time_spent;
@@ -397,7 +473,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	for (int j = 0; j < m; j++) {
 
-		hash = js & (m - 1);
+		hash = (int)js & (m - 1);
 
 		//if ((bits[Sints + (hash / 32)] & (1 << (hash & 31))) == 0) {
 		//hashKeys[(Sm + hash1)] = (js & 0xFFFF0000) + 0x0000FFFF;
@@ -405,8 +481,14 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 		//}
 		bits[Sints + (hash >> 5)] |= (1 << (hash & 31));
 
-		js = montmul(js, newKB, b, bprime);
+		js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
 
+	}
+
+	end = clock();
+	time_spent = (end - begin);
+	if (printer) {
+		printf("Cycles doing dry run of new hash table was %d (%d inserts (baby steps) @ %d cycles average)\n", time_spent, m, time_spent / m);
 	}
 
 	//Try to populate our new hash table array ------------------------------------------------------------
@@ -422,7 +504,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	for (int j = 0; j < m; j++) {
 
-		hash = js & (m - 1);
+		hash = (int)js & (m - 1);
 		store = (js & 0xFFFF0000) + 0x0000FFFF; //This blanks off the last 16 bits and adds a null pointer. This will contain our pointer
 
 		key = hashKeys[(Sm + hash)];
@@ -462,7 +544,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 		hashKeys[(Sm + hash)] = store; //Update the linked list head, either with new data and a null pointer, or an updated pointer
 
-		js = montmul(js, newKB, b, bprime);
+		js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
 
 
 	}
@@ -551,7 +633,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	for (int t = 0; t < shift; t++) {
 		//beginMont = clock();
-		c1 = montmul(c1, c1, b, bprime);
+		c1 = montmul(c1, c1, mlo, mhi, mprimelo, mprimehi);
 		//endMont = clock();
 		//time_spent = (endMont - beginMont);
 		//montmultime += time_spent;
@@ -580,7 +662,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	for (int t = 0; t < tMin[0]; t++) {
 		//beginMont = clock();
-		beta = montmul(beta, c1, b, bprime);
+		beta = montmul(beta, c1, mlo, mhi, mprimelo, mprimehi);
 		//endMont = clock();
 		//time_spent = (endMont - beginMont);
 		//montmultime += time_spent;
@@ -607,13 +689,13 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 		if (thisk != lastk) {
 			beginLeg = clock();
 			leg1 = legendre(thisk, b);
-			leg2 = legendre(*Base*thisk, b);
+			leg2 = !(leg1^legendre(base[0], b)); //Rather than use k*base, use the multiplicative property of legendre to save any overflows
 			leg = leg + 2;
 			endLeg = clock();
 			time_spent = (endLeg - beginLeg);
 			legtime += time_spent;
 			fixedBeta = modul64(thisk, 0, b);
-			fixedBeta = montmul(fixedBeta, beta, b, bprime);
+			fixedBeta = montmul(fixedBeta, beta, mlo, mhi, mprimelo, mprimehi);
 		}
 
 		remainder = knmatrix[(k* *rowOffset) + 1];
@@ -622,7 +704,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 			//We need to do something
 			unsigned long long sB = fixedBeta;
 			for (int rem = 0; rem < remainder; rem++) {
-				sB = montmul(sB, KernelBase, b, bprime);
+				sB = montmul(sB, KernelBase, mlo, mhi, mprimelo, mprimehi);
 			}
 
 			for (int t = tMin[0]; t < tMax[0]; t++) {
@@ -632,7 +714,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 				//hash = sB & (m - 1);
 
 				probe = 0;
-				pointer = sB & (m - 1);
+				pointer = (int)sB & (m - 1);
 
 				//while (true) {
 
@@ -708,7 +790,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 								break;
 							}
 
-							js = montmul(js, newKB, b, bprime);
+							js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
 
 						}
 						//printf("Match in S %d. t=%d, hash=%d, probe=%d beta=%llu rem=%d. Output will be %llu | %d*%d^%d-1\n", S, t, hash, probe, beta, remainder, b, thisk, *Base, ((output*Q) + remainder));
@@ -734,13 +816,13 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 				}
 
-				sB = montmul(sB, c1, b, bprime);
+				sB = montmul(sB, c1, mlo, mhi, mprimelo, mprimehi);
 
 
 			}
 
 			if (output > 0) {
-				printf("Output will be %llu | %d*%d^%d-1. Thread %d\n", b, thisk, *Base, ((output* *Q) + remainder), S);
+				printf("Output will be %llu | %d*%d^%d-1. Thread %d\n", b, thisk, base[0], ((output* *Q) + remainder), S);
 				output = -1;
 			}
 		}
@@ -1039,7 +1121,7 @@ int main(int argc, char* argv[])
 	//Reset the counts
 	count1 = 0;
 	count3 = 0;
-	int base = 0;
+	int baseCPU = 0;
 	ifstream myfile2(abcdFile);
 	if (myfile2.is_open())
 	{
@@ -1067,12 +1149,12 @@ int main(int argc, char* argv[])
 				ks[count1] = kval;
 				count1++;
 				//Get the base
-				if (base == 0) {
+				if (baseCPU == 0) {
 					token = token.substr(n + 1);
 					n = token.find("^");
 					string b = token.substr(0, n);
 					//cout << b << endl;
-					base = stoi(b);
+					baseCPU = stoi(b);
 					cout << "The base is " << base << endl;
 				}
 				//Get the starting n-value - remove the square brakets
@@ -1258,7 +1340,8 @@ int main(int argc, char* argv[])
 
 	unsigned long long startLow = low; //Don't touch this. Used for timing purposes
 
-									   //Use the idea of a segmented sieve. Generate a list of small primes first
+	//Use the idea of a segmented sieve. Generate a list of small primes first
+	//If we use too many small primes then it can affect sieving, i.e. we cant use small -p values. Check for this in future
 	clock_t begin = clock();
 	int primeCount = 16384 * 128;
 	int count = 0;
@@ -1321,11 +1404,11 @@ int main(int argc, char* argv[])
 		goto Error;
 	}
 
-	cudaStatus = cudaMalloc((void**)&dev_e, sizeof(int));
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
-	}
+	//cudaStatus = cudaMalloc((void**)&dev_e, sizeof(int));
+	//if (cudaStatus != cudaSuccess) {
+	//	fprintf(stderr, "cudaMalloc failed!");
+	//	goto Error;
+	//}
 
 	cudaStatus = cudaMalloc((void**)&dev_f, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
@@ -1397,9 +1480,15 @@ int main(int argc, char* argv[])
 		goto Error;
 	}
 
-	cudaStatus = cudaMemcpy(dev_e, &base, sizeof(int), cudaMemcpyHostToDevice);
+	//cudaStatus = cudaMemcpy(dev_e, &base, sizeof(int), cudaMemcpyHostToDevice);
+	//if (cudaStatus != cudaSuccess) {
+	//	fprintf(stderr, "cudaMemcpy failed!");
+	//	goto Error;
+	//}
+
+	cudaStatus = cudaMemcpyToSymbol(base, &baseCPU, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy failed!");
+		fprintf(stderr, "cudaMemcpy to constant memory failed!");
 		goto Error;
 	}
 
@@ -1524,7 +1613,7 @@ int main(int argc, char* argv[])
 		cudaStreamCreate(&stream0);
 		//cudaStreamCreate(&stream1);
 
-		addKernel1 << <blocks, threads, 0, stream0 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h, dev_i, dev_j, dev_k, dev_n);
+		addKernel1 << <blocks, threads, 0, stream0 >> >(dev_a, dev_b, dev_c, dev_f, dev_g, dev_h, dev_i, dev_j, dev_k, dev_n);
 		//addKernel1 << <blocks, threads, 0, stream1 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h, dev_i, dev_j);
 
 		//This uses too much shared memory and kills occupancy. Really we want to use no more than 16 ints per thread (for 64 threads per block)!
@@ -1553,6 +1642,7 @@ int main(int argc, char* argv[])
 		cudaStatus = cudaDeviceSynchronize();
 		if (cudaStatus != cudaSuccess) {
 			fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
+			cudaGetLastError();
 		}
 
 		// Copy output vector from GPU buffer to host memory.
@@ -1633,7 +1723,7 @@ Error:
 	cudaFree(dev_a);
 	cudaFree(dev_b);
 	cudaFree(dev_c);
-	cudaFree(dev_e);
+	//cudaFree(dev_e);
 	cudaFree(dev_f);
 	cudaFree(dev_g);
 	cudaFree(dev_h);
