@@ -22,6 +22,9 @@ using namespace std;
 
 void generateGPUPrimes(unsigned long long *KernelP, unsigned long long low, unsigned int *smallP, int testArraySize, int primeCount, int arraySize, unsigned int *mark1);
 
+#define PRINT true
+#undef PRINT
+
 int *dev_a = 0; //NOut
 unsigned long long *dev_b = 0; //KernelP
 int *dev_c = 0; //kns
@@ -40,7 +43,7 @@ int *dev_n = 0; //minSubs
 cudaError_t cudaStatus;
 
 
-__device__ int legendre(unsigned int a, unsigned long long p) {
+__device__ __forceinline__ int legendre(unsigned int a, unsigned long long p) {
 	//Work out the legendre symbol for (a/p)
 	//This code is taken straight from the source code of SR2Sieve
 	unsigned int x, y;
@@ -144,16 +147,26 @@ __device__ __forceinline__ unsigned long long modul64(unsigned long long x, unsi
 	and z, giving the remainder (modulus) as the result.
 	Must have x < z (to get a 64-bit result). This is
 	checked for. */
-	long long t;
+
+	//If we limit z to being less 2^63, then x will always have a 0 first bit (as x < z)
+	//In which case t will always be 0, so is not needed. 
+	//Even when we shift x left (double it) after we subtract z it will never have its first bit set. 
+
+
+	//long long t;
+	#ifdef PRINT
 	if (x >= z) {
 		printf("Bad call to modul64, must have x < z.");
 	}
+	#endif
+
 #pragma unroll 1
 	for (int i = 0; i < 64; i++) { // Do 64 times.
-		t = (long long)x >> 63; // All 1's if x(63) = 1.
+		//t = (long long)x >> 63; // All 1's if x(63) = 1?
 		x = (x << 1) | (y >> 63); // Shift x || y left      <- Bitwise OR?
 		y = y << 1; // one bit.
-		if ((x | t) >= z) {
+		//if ((x | t) >= z) {
+		if (x >= z) {
 			x = x - z;
 			y = y + 1;
 		}
@@ -161,61 +174,7 @@ __device__ __forceinline__ unsigned long long modul64(unsigned long long x, unsi
 	return x; // Quotient is y.
 }
 
-__device__ unsigned long long montmul64(unsigned long long abar, unsigned long long bbar, unsigned long long m, unsigned long long mprime) {
-
-	//Its possible we don't need the checks for overflow in the asm and at the end of the method. No test cases have revealed missed factors if those checks are removed
-
-	unsigned long long thi, tlo, tm;
-	//unsigned long long uhi, ulo;
-	//unsigned int ov;
-
-	//mulul64(abar, bbar, &thi, &tlo); // t = abar*bbar.
-	//thi = __umul64hi(abar, bbar);
-	//tlo = abar * bbar;
-	/* Now compute u = (t + ((t*mprime) & mask)*m) >> 64.
-	The mask is fixed at 2**64-1. Because it is a 64-bit
-	quantity, it suffices to compute the low-order 64
-	bits of t*mprime, which means we can ignore thi. */
-	//tm = tlo * mprime;
-	//mulul64(tm, m, &tmmhi, &tmmlo); // tmm = tm*m.
-	//tmmhi = __umul64hi(tm, m);
-	//tmmlo = tm*m;
-
-
-	//PTX Version 2 - Clobbers less registers - very similar speed.
-	//asm(//"{.reg .u64 t1;\n\t"              // temp 64-bit reg t1 = tmmlo
-	//	"mad.lo.cc.u64 %0, %3, %4, %0;\n\t" //MAD: "tlo = (tm*m) + tlo" and set the carry out 
-	//"add.cc.u64 %0, %0, t1;\n\t" //Add tlo = tlo + tmmlo and set carry out. 
-	//	"madc.hi.cc.u64 %1, %3, %4, %1;\n\t" //MAD: "thi = hi(tm*m) + thi" use the previous carry and set the carry out
-	//"addc.cc.u64 %1, %1, %3;\n\t" //Add thi and tmmhi, use the previous carry and set carry out.
-	//	"addc.u32 %2, 0, 0;" //This sets ov to 1 if the previous addition overflowed.
-	//"}"
-	//	: "=+l"(tlo), "=+l"(thi) "=r"(ov) : "l"(tm), "l"(m)
-	//	);
-
-	//PTX Version 3 - Deal with the overflow case in the asm
-	asm("mul.lo.u64 %0, %4, %5;\n\t" //tlo = abar * bbar
-		"mul.hi.u64 %1, %4, %5;\n\t" //thi = __umul64hi(abar, bbar);
-		"mul.lo.u64 %2, %0, %6;\n\t" //tm = tlo *mprime
-		"mad.lo.cc.u64 %0, %2, %3, %0;\n\t" //MAD: "tlo = (tm*m) + tlo" and set the carry out 
-		"madc.hi.cc.u64 %1, %2, %3, %1;\n\t" //MAD: "thi = hi(tm*m) + thi" use the previous carry and set the carry out
-		"addc.u64 %2, 0, 0;" //This sets ov to 1 if the previous addition overflowed. We're using tlo as ov, as we don't need it anymore
-		//"mul.lo.u64 %0, %0, %3;\n\t" //Multiply m by ov. If ov was 0, this will be 0, else if ov was 1, this will be m
-		//"sub.u64 %1, %1, %0;" //Subtract m from thi (if we overflowed)
-							  //"sub.cc.u64 %1, %1, %3;\n\t" //Subtract m from thi (to make sure thi is bigger than m). If borrow flag is set, them add m back on
-							  //"addc.u64 %0, 0, 0;" //Add the borrow flag to ov
-							  //"mad.lo.u64 %1, %0, %3, %1;"
-		: "=+l"(tlo), "=+l"(thi), "=+l"(tm) : "l"(m), "l"(abar), "l"(bbar), "l"(mprime)
-	);
-
-	if (tm > 0 || thi >= m) { // If u >= m,
-	//if (thi >= m) {// If u >= m,
-		thi = thi - m; // subtract m from u.
-	}
-	return thi;
-}
-
-__device__ unsigned long long montmul(unsigned long long abar, unsigned long long bbar, unsigned int mlo, unsigned int mhi, unsigned int mprimelo, unsigned int mprimehi) {
+__device__ __forceinline__ unsigned long long montmul(unsigned long long abar, unsigned long long bbar, unsigned int mlo, unsigned int mhi, unsigned int mprimelo, unsigned int mprimehi) {
 
 	//Take the 64 bit inputs, but do all multiplies in 32 bit chunks
 	unsigned int alo = (unsigned int)abar;
@@ -350,6 +309,9 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	clock_t beginLeg = clock();
 	clock_t endLeg = clock();
 
+	clock_t end = clock();
+	int time_spent = 0;
+
 	//This deals with the hashTables
 	const int m = *hashElements;
 	const int mem = m * (*hashDensity); //This is hashTableElements*density, to keep the correct thread using correct hash table 
@@ -372,6 +334,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	unsigned long long bprime = 0;
 	unsigned long long rInv = 1;
 
+	#ifdef PRINT
 	int montmuls = 0;
 	int montmuls1 = 0;
 	int modul = 0;
@@ -379,9 +342,8 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	int bitUpdates = 0;
 	int inserts = 0;
 
-
-	clock_t end = clock();
-	int time_spent = (end - begin);
+	end = clock();
+	time_spent = (end - begin);
 	if (printer) {
 		printf("KernelBase = %d\n", base[0]);
 		printf("HashTableElements = %d. %d at 1/%d density.\n", mem, m, *hashDensity);
@@ -391,9 +353,11 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	}
 
 	begin = clock();
+	#endif
 
 	xbinGCDnew(b, rInv, bprime);
 
+	#ifdef PRINT
 	end = clock();
 	time_spent = (end - begin);
 	if (printer) {
@@ -401,6 +365,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 		printf("2*inp*rInv - b*bprime = %llu\n", (2 * 9223372036854775808 * rInv - (b*bprime)));
 		printf("Cycles to do xbinGCD was %d\n", time_spent);
 	}
+	#endif
 
 	//beginModul = clock();
 	unsigned long long KernelBase = modul64(base[0], 0, b);
@@ -446,11 +411,13 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	newKB = binExtEuclid(newKB, b);
 
+	#ifdef PRINT
 	end = clock();
 	time_spent = (end - begin);
 	if (printer) {
 		printf("Cycles to do binExtEuclid was %d\n", time_spent);
 	}
+	#endif
 
 
 	unsigned long long js = oneMS;
@@ -485,11 +452,13 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	}
 
+	#ifdef PRINT
 	end = clock();
 	time_spent = (end - begin);
 	if (printer) {
 		printf("Cycles doing dry run of new hash table was %d (%d inserts (baby steps) @ %d cycles average)\n", time_spent, m, time_spent / m);
 	}
+	#endif
 
 	//Try to populate our new hash table array ------------------------------------------------------------
 	//New method - pre-populate with non-collision elements. Backfill the spaces.
@@ -525,6 +494,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 			while (((bits[Sints + (firstFree >> 5)] >> (firstFree & 31)) & 1) == 1) {
 				firstFree++;
 			}
+			//Could we do this with bfind instead?
 
 			//for (int i = bitArrayCounter; i < (m >> 5); i++) {
 			//	if (bits[Sints + i] != 0xFFFFFFFF) {
@@ -617,11 +587,13 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	////Finished calculating the hash table --------------------------------------------------------------------
 
+	#ifdef PRINT
 	end = clock();
 	time_spent = (end - begin);
 	if (printer) {
 		printf("Cycles calculating new hash table was %d (%d inserts (baby steps) @ %d cycles average)\n", time_spent, m, time_spent / m);
 	}
+	#endif
 
 	begin = clock();
 	//Compute KernelBase^-m (mod b)
@@ -645,9 +617,11 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	//int tMin = tMin[0];
 	//int tMax = tMax[0];
 
+	#ifdef PRINT
 	if (printer) {
 		printf("tMin = %d. tMax = %d\n", tMin[0], tMax[0]);
 	}
+	#endif
 
 	lookups = 0;
 	int countmuls = tMin[0];
@@ -670,8 +644,9 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	}
 
 	int leg1;
+	int leg2fixed = legendre(base[0], b);
 	int leg2;
-	int leg = 0;
+	int leg = 1;
 
 	int probe = 0;
 
@@ -684,21 +659,30 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	//Work through the matrix of kn values
 	for (int k = 0; k < *minSubs; k++) {
-		lastk = thisk;
-		thisk = knmatrix[k* *rowOffset];
-		if (thisk != lastk) {
-			beginLeg = clock();
-			leg1 = legendre(thisk, b);
-			leg2 = !(leg1^legendre(base[0], b)); //Rather than use k*base, use the multiplicative property of legendre to save any overflows
-			leg = leg + 2;
-			endLeg = clock();
-			time_spent = (endLeg - beginLeg);
-			legtime += time_spent;
-			fixedBeta = modul64(thisk, 0, b);
-			fixedBeta = montmul(fixedBeta, beta, mlo, mhi, mprimelo, mprimehi);
-		}
+		//while (k < *minSubs) {
+			lastk = thisk;
+			thisk = knmatrix[k* *rowOffset];
+			if (thisk != lastk) {
+				beginLeg = clock();
+				leg1 = legendre(thisk, b);
+				leg2 = !(leg1^leg2fixed); //Rather than use k*base, use the multiplicative property of legendre to save any overflows
+#ifdef PRINT
+				leg = leg + 1;
+				endLeg = clock();
+				time_spent = (endLeg - beginLeg);
+				legtime += time_spent;
+#endif		
+				fixedBeta = modul64(thisk, 0, b);
+				fixedBeta = montmul(fixedBeta, beta, mlo, mhi, mprimelo, mprimehi);
+			}
 
-		remainder = knmatrix[(k* *rowOffset) + 1];
+			remainder = knmatrix[(k* *rowOffset) + 1];
+
+			//if ((remainder % 2 == 0 && leg1 == 1) || (remainder % 2 == 1 && leg2 == 1)) {
+			//	break;
+			//}
+			//k++;
+		//}
 
 		if ((remainder % 2 == 0 && leg1 == 1) || (remainder % 2 == 1 && leg2 == 1)) {
 			//We need to do something
@@ -820,7 +804,6 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 
 			}
-
 			if (output > 0) {
 				printf("Output will be %llu | %d*%d^%d-1. Thread %d\n", b, thisk, base[0], ((output* *Q) + remainder), S);
 				output = -1;
@@ -832,6 +815,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 		//}
 	}
 
+	#ifdef PRINT
 	if (printer) {
 		printf("Number of giant steps: %d\n", giant);
 		//		printf("Number of collisions: %d\n", collisions);
@@ -848,6 +832,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 		//		printf("Average (BSGS Cycles/muls) was %d\n", (time_spent / countmuls));
 		printf("Average (BSGS Cycles/lookups) was %d\n", (time_spent / lookups));
 	}
+	#endif
 
 	//begin = clock();
 
@@ -863,6 +848,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	time_spent = (end - beginfull);
 	//NOut[S] = time_spent;
 	NOut[S] = lookups;
+	#ifdef PRINT
 	if (printer) {
 		//printf("-------------------- Creating Hash Table --------------------\n");
 		//printf("Cycles doing Bit Array Lookups (creating Hash Table) was %d (%d lookups @ %d cycles average) - %d%\n", bittime, bitLookups, bittime / bitLookups, (bittime * 100 / time_spent));
@@ -877,6 +863,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 		//printf("Cycles doing Montgomery Multiplication was %d (%d function calls @ %d cycles average) - %d%\n", montmultime, montmuls, montmultime / montmuls, (montmultime * 100 / time_spent));
 		printf("Cycles to execute one full thread was %d\n", time_spent);
 	}
+	#endif
 
 
 }
