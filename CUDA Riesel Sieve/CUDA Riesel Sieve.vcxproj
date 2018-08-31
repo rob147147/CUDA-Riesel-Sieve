@@ -195,7 +195,7 @@ copy "$(CudaToolkitBinDir)\cudart*.dll" "$(OutDir)"</Command>
       <FastMath>true</FastMath>
       <GPUDebugInfo>false</GPUDebugInfo>
       <Keep>true</Keep>
-      <MaxRegCount>65</MaxRegCount>
+      <MaxRegCount>62</MaxRegCount>
     </CudaCompile>
     <CudaLink>
       <Optimization>O2</Optimization>

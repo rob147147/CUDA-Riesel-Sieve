@@ -23,7 +23,7 @@ using namespace std;
 void generateGPUPrimes(unsigned long long *KernelP, unsigned long long low, unsigned int *smallP, int testArraySize, int primeCount, int arraySize, unsigned int *mark1);
 
 #define PRINT true
-#undef PRINT
+//#undef PRINT
 
 int *dev_a = 0; //NOut
 unsigned long long *dev_b = 0; //KernelP
@@ -173,6 +173,7 @@ __device__ __forceinline__ unsigned long long modul64(unsigned long long x, unsi
 	}
 	return x; // Quotient is y.
 }
+
 
 __device__ __forceinline__ unsigned long long montmul(unsigned long long abar, unsigned long long bbar, unsigned int mlo, unsigned int mhi, unsigned int mprimelo, unsigned int mprimehi) {
 
@@ -385,6 +386,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	for (int qq = 0; qq < *Q; qq++) {
 		//beginMont = clock();
 		newKB = montmul(KernelBase, newKB, mlo, mhi, mprimelo, mprimehi);
+		//newKB = montmul64(KernelBase, newKB, b, bprime);
 		//endMont = clock();
 		//time_spent = (endMont - beginMont);
 		//montmultime += time_spent;
@@ -395,7 +397,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	unsigned long long c1 = newKB;
 
 	unsigned long long plo = newKB * rInv;
-	unsigned long long phi = __umul64hi(newKB, rInv);;
+	unsigned long long phi = __umul64hi(newKB, rInv);
 
 
 	//beginModul = clock();
@@ -407,7 +409,9 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	//unsigned long long newKB2 = newKB;
 
+	#ifdef PRINT
 	begin = clock();
+	#endif
 
 	newKB = binExtEuclid(newKB, b);
 
@@ -434,7 +438,9 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 
 	//Do a dry run through the baby steps to find the free positions in the hash table
+	#ifdef PRINT
 	begin = clock();
+	#endif
 
 	unsigned int hash = 0;
 
@@ -449,6 +455,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 		bits[Sints + (hash >> 5)] |= (1 << (hash & 31));
 
 		js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
+		//js = montmul64(js, newKB, b, bprime);
 
 	}
 
@@ -515,6 +522,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 		hashKeys[(Sm + hash)] = store; //Update the linked list head, either with new data and a null pointer, or an updated pointer
 
 		js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
+		//js = montmul64(js, newKB, b, bprime);
 
 
 	}
@@ -606,6 +614,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	for (int t = 0; t < shift; t++) {
 		//beginMont = clock();
 		c1 = montmul(c1, c1, mlo, mhi, mprimelo, mprimehi);
+		//c1 = montmul64(c1, c1, b, bprime);
 		//endMont = clock();
 		//time_spent = (endMont - beginMont);
 		//montmultime += time_spent;
@@ -637,6 +646,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	for (int t = 0; t < tMin[0]; t++) {
 		//beginMont = clock();
 		beta = montmul(beta, c1, mlo, mhi, mprimelo, mprimehi);
+		//beta = montmul64(beta, c1, b, bprime);
 		//endMont = clock();
 		//time_spent = (endMont - beginMont);
 		//montmultime += time_spent;
@@ -674,6 +684,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 #endif		
 				fixedBeta = modul64(thisk, 0, b);
 				fixedBeta = montmul(fixedBeta, beta, mlo, mhi, mprimelo, mprimehi);
+				//fixedBeta = montmul64(fixedBeta, beta, b, bprime);
 			}
 
 			remainder = knmatrix[(k* *rowOffset) + 1];
@@ -689,6 +700,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 			unsigned long long sB = fixedBeta;
 			for (int rem = 0; rem < remainder; rem++) {
 				sB = montmul(sB, KernelBase, mlo, mhi, mprimelo, mprimehi);
+				//sB = montmul64(sB, KernelBase, b, bprime);
 			}
 
 			for (int t = tMin[0]; t < tMax[0]; t++) {
@@ -775,6 +787,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 							}
 
 							js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
+							//js = montmul64(js, newKB, b, bprime);
 
 						}
 						//printf("Match in S %d. t=%d, hash=%d, probe=%d beta=%llu rem=%d. Output will be %llu | %d*%d^%d-1\n", S, t, hash, probe, beta, remainder, b, thisk, *Base, ((output*Q) + remainder));
@@ -801,6 +814,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 				}
 
 				sB = montmul(sB, c1, mlo, mhi, mprimelo, mprimehi);
+				//sB = montmul64(sB, c1, b, bprime);
 
 
 			}
@@ -1319,8 +1333,12 @@ int main(int argc, char* argv[])
 
 	//Generate Primes -------------------------------------------------------------------------------------------
 
-	unsigned long long *KernelP = (unsigned long long *)malloc(arraySize * sizeof(unsigned long long));
-	int *NOut = (int *)malloc(arraySize * sizeof(int));
+	//unsigned long long *KernelP = (unsigned long long *)malloc(arraySize * sizeof(unsigned long long));
+	int *NOut;
+	unsigned long long *KernelP;
+	//int *NOut = (int *)malloc(arraySize * sizeof(int));
+	cudaMallocHost((void **)&NOut, arraySize * sizeof(int));
+	cudaMallocHost((void **)&KernelP, arraySize * sizeof(unsigned long long));
 
 	//Low should be greater than the primes we use below.
 
@@ -1573,32 +1591,35 @@ int main(int argc, char* argv[])
 		begin = clock();
 		cout << "Try to launch the CUDA kernel" << endl;
 
+		cudaStream_t stream0;
+		//cudaStream_t stream1;
+		cudaStreamCreate(&stream0);
+		//cudaStreamCreate(&stream1);
+
 		// Copy input vectors from host memory to GPU buffers.
-		cudaStatus = cudaMemcpy(dev_b, KernelP, arraySize * sizeof(unsigned long long), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpyAsync(dev_b, KernelP, arraySize * sizeof(unsigned long long), cudaMemcpyHostToDevice, stream0);
 		if (cudaStatus != cudaSuccess) {
 			fprintf(stderr, "cudaMemcpy input failed!");
 		}
 
-		cudaStatus = cudaMemset(dev_g, 0, arraySize * hashTableSize * hashScaling * sizeof(int));
+		cudaStatus = cudaMemsetAsync(dev_g, 0, arraySize * hashTableSize * hashScaling * sizeof(int), stream0);
 		if (cudaStatus != cudaSuccess) {
 			fprintf(stderr, "cudaMemcpy input failed!");
 		}
 
-		cudaStatus = cudaMemset(dev_j, 0, ((arraySize * hashTableSize) / 32) * sizeof(unsigned int));
+		cudaStatus = cudaMemsetAsync(dev_j, 0, ((arraySize * hashTableSize) / 32) * sizeof(unsigned int), stream0);
 		if (cudaStatus != cudaSuccess) {
 			fprintf(stderr, "cudaMemcpy input failed!");
 		}
 
+		cudaStreamSynchronize(stream0);
 
 		//cudaEvent_t start, stop;
 		//cudaEventCreate(&start);
 		//cudaEventCreate(&stop);
 		// Launch a kernel on the GPU with one thread for each element.
 		//cudaEventRecord(start);
-		cudaStream_t stream0;
-		//cudaStream_t stream1;
-		cudaStreamCreate(&stream0);
-		//cudaStreamCreate(&stream1);
+
 
 		addKernel1 << <blocks, threads, 0, stream0 >> >(dev_a, dev_b, dev_c, dev_f, dev_g, dev_h, dev_i, dev_j, dev_k, dev_n);
 		//addKernel1 << <blocks, threads, 0, stream1 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h, dev_i, dev_j);
@@ -1623,6 +1644,11 @@ int main(int argc, char* argv[])
 		//We should try to generate the next array of primes in here!
 		generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1);
 
+		// Copy output vector from GPU buffer to host memory.
+		cudaStatus = cudaMemcpyAsync(NOut, dev_a, arraySize * sizeof(int), cudaMemcpyDeviceToHost, stream0);
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "cudaMemcpy output failed!");
+		}
 
 		// cudaDeviceSynchronize waits for the kernel to finish, and returns
 		// any errors encountered during the launch.
@@ -1630,12 +1656,6 @@ int main(int argc, char* argv[])
 		if (cudaStatus != cudaSuccess) {
 			fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
 			cudaGetLastError();
-		}
-
-		// Copy output vector from GPU buffer to host memory.
-		cudaStatus = cudaMemcpy(NOut, dev_a, arraySize * sizeof(int), cudaMemcpyDeviceToHost);
-		if (cudaStatus != cudaSuccess) {
-			fprintf(stderr, "cudaMemcpy output failed!");
 		}
 
 
