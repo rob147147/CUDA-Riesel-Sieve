@@ -1382,7 +1382,15 @@ int main(int argc, char* argv[])
 	//Try setting up the GPU just once
 
 	// Choose which GPU to run on, change this on a multi-GPU system.
+	//cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
+		goto Error;
+	}
 	cudaStatus = cudaSetDevice(0);
+	cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
+	
+
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
 		goto Error;
@@ -1566,12 +1574,17 @@ int main(int argc, char* argv[])
 
 	cout << "Low is now set to " << low << endl;
 	generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1);
-
-	cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
+	cout << endl;
 
 	int kernelCount = 0;
 	clock_t loopTime = clock();
 	//From here we need to loop to keep the GPU busy. 
+
+	cudaStream_t stream0;
+	//cudaStream_t stream1;
+	cudaStreamCreate(&stream0);
+	//cudaStreamCreate(&stream1);
+
 	while (low < high) {
 
 		kernelCount++;
@@ -1591,46 +1604,54 @@ int main(int argc, char* argv[])
 		begin = clock();
 		cout << "Try to launch the CUDA kernel" << endl;
 
-		cudaStream_t stream0;
-		//cudaStream_t stream1;
-		cudaStreamCreate(&stream0);
-		//cudaStreamCreate(&stream1);
-
 		// Copy input vectors from host memory to GPU buffers.
-		cudaStatus = cudaMemcpyAsync(dev_b, KernelP, arraySize * sizeof(unsigned long long), cudaMemcpyHostToDevice, stream0);
-		if (cudaStatus != cudaSuccess) {
-			fprintf(stderr, "cudaMemcpy input failed!");
-		}
+		//cudaStatus = cudaMemcpyAsync(dev_b, KernelP, arraySize * sizeof(unsigned long long), cudaMemcpyHostToDevice, stream0);
+		//if (cudaStatus != cudaSuccess) {
+		//	fprintf(stderr, "cudaMemcpy input failed!");
+		//}
 
-		cudaStatus = cudaMemsetAsync(dev_g, 0, arraySize * hashTableSize * hashScaling * sizeof(int), stream0);
-		if (cudaStatus != cudaSuccess) {
-			fprintf(stderr, "cudaMemcpy input failed!");
-		}
+		//cudaStatus = cudaMemsetAsync(dev_g, 0, arraySize * hashTableSize * hashScaling * sizeof(int), stream0);
+		//if (cudaStatus != cudaSuccess) {
+		//	fprintf(stderr, "cudaMemcpy input failed!");
+		//}
 
-		cudaStatus = cudaMemsetAsync(dev_j, 0, ((arraySize * hashTableSize) / 32) * sizeof(unsigned int), stream0);
-		if (cudaStatus != cudaSuccess) {
-			fprintf(stderr, "cudaMemcpy input failed!");
-		}
+		//cudaStatus = cudaMemsetAsync(dev_j, 0, ((arraySize * hashTableSize) / 32) * sizeof(unsigned int), stream0);
+		//if (cudaStatus != cudaSuccess) {
+		//	fprintf(stderr, "cudaMemcpy input failed!");
+		//}
 
-		cudaStreamSynchronize(stream0);
-
-		//cudaEvent_t start, stop;
-		//cudaEventCreate(&start);
-		//cudaEventCreate(&stop);
+		cudaEvent_t start, stop;
+		cudaEventCreateWithFlags(&start, cudaEventBlockingSync);
+		cudaEventCreateWithFlags(&stop, cudaEventBlockingSync);
 		// Launch a kernel on the GPU with one thread for each element.
-		//cudaEventRecord(start);
+		cudaEventRecord(start, stream0);
 
 
-		addKernel1 << <blocks, threads, 0, stream0 >> >(dev_a, dev_b, dev_c, dev_f, dev_g, dev_h, dev_i, dev_j, dev_k, dev_n);
+		cudaMemcpyAsync(dev_b, KernelP, arraySize * sizeof(unsigned long long), cudaMemcpyHostToDevice, stream0);
+		cudaMemsetAsync(dev_g, 0, arraySize * hashTableSize * hashScaling * sizeof(int), stream0);
+		cudaMemsetAsync(dev_j, 0, ((arraySize * hashTableSize) / 32) * sizeof(unsigned int), stream0);
+		//cudaStreamSynchronize(stream0);
+
+
+		addKernel1 <<<blocks, threads, 0, stream0 >>>(dev_a, dev_b, dev_c, dev_f, dev_g, dev_h, dev_i, dev_j, dev_k, dev_n);
 		//addKernel1 << <blocks, threads, 0, stream1 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h, dev_i, dev_j);
 
 		//This uses too much shared memory and kills occupancy. Really we want to use no more than 16 ints per thread (for 64 threads per block)!
 		//addKernel1 << <blocks, threads, ((threads*hashElements*hashDensity) / 32)*sizeof(int), stream0 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h, dev_i);
 
 		//addKernel1<<<blocks,threads,0,stream1>>>(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h);
-		//cudaEventRecord(stop);
 
-		//cudaEventSynchronize(stop);
+		//generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1);
+		//high = high - 10000000;
+
+		cudaMemcpyAsync(NOut, dev_a, arraySize * sizeof(int), cudaMemcpyDeviceToHost, stream0);
+
+		cudaEventRecord(stop,stream0);
+
+		//We should try to generate the next array of primes in here!
+		generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1);
+
+		cudaEventSynchronize(stop);
 		//float milliseconds = 0;
 		//cudaEventElapsedTime(&milliseconds, start, stop);
 		//printf("Time taken: %f ms \n", milliseconds);
@@ -1641,28 +1662,34 @@ int main(int argc, char* argv[])
 		//    fprintf(stderr, "addKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
 		//}
 
-		//We should try to generate the next array of primes in here!
-		generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1);
 
 		// Copy output vector from GPU buffer to host memory.
-		cudaStatus = cudaMemcpyAsync(NOut, dev_a, arraySize * sizeof(int), cudaMemcpyDeviceToHost, stream0);
-		if (cudaStatus != cudaSuccess) {
-			fprintf(stderr, "cudaMemcpy output failed!");
-		}
+		//cudaStatus = cudaMemcpyAsync(NOut, dev_a, arraySize * sizeof(int), cudaMemcpyDeviceToHost, stream0);
+		//if (cudaStatus != cudaSuccess) {
+		//	fprintf(stderr, "cudaMemcpy output failed!");
+		//}
+
+		//We should try to generate the next array of primes in here!
+		//generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1);
+		//high = high - 10000000;
+
+		//cudaStreamSynchronize(stream0);
+		//cudaMemcpyAsync(NOut, dev_a, arraySize * sizeof(int), cudaMemcpyDeviceToHost, stream0);
+		//cudaStreamSynchronize(stream0);
 
 		// cudaDeviceSynchronize waits for the kernel to finish, and returns
 		// any errors encountered during the launch.
-		cudaStatus = cudaDeviceSynchronize();
-		if (cudaStatus != cudaSuccess) {
-			fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
-			cudaGetLastError();
-		}
+		//cudaStatus = cudaDeviceSynchronize();
+		//if (cudaStatus != cudaSuccess) {
+		//	fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
+		//	cudaGetLastError();
+		//}
 
 
-		if (cudaStatus != cudaSuccess) {
-			fprintf(stderr, "addWithCuda failed!");
-			return 1;
-		}
+		//if (cudaStatus != cudaSuccess) {
+		//	fprintf(stderr, "addWithCuda failed!");
+		//	return 1;
+		//}
 		end = clock();
 		time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
 		cout << "Time to execute kernel (outside function) " << time_spent << "s" << endl;
