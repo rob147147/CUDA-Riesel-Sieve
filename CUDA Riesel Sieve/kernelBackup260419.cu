@@ -1,3 +1,9 @@
+//Complete - Read in an ABCD file, find Q, split into subsequences
+//Complete - CUDA code with correct outputs
+
+//TODO - Scale hash table to the size of GPU RAM
+
+
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
@@ -22,6 +28,7 @@ void generateGPUPrimes(unsigned int *KernelP, unsigned long long low, unsigned i
 int *dev_a = 0; //NOut
 unsigned int *dev_b = 0; //KernelP
 int *dev_c = 0; //kns
+				//__constant__ int dev_c[512];
 __constant__ int base[1]; //Base
 __constant__ unsigned long long lowGPU[1]; //Base
 int *dev_f; //counterIn
@@ -61,6 +68,7 @@ __device__ __forceinline__ int legendre(unsigned int a, unsigned long long p) {
 			}
 		}
 		//Swap x and y
+		//t = x, x = y, y = t;
 		x = x ^ y;
 		y = x ^ y;
 		x = x ^ y;
@@ -78,16 +86,23 @@ __device__  __forceinline__ void xbinGCDnew(unsigned long long beta, unsigned lo
 {
 	unsigned long long alpha = 9223372036854775808;
 	unsigned long long u = 1;
-	// Note that alpha is even and beta is odd.
+	//unsigned long long a = 9223372036854775808;
+	//u = 1; v = 0;
+	//alpha = a;
+	// Note that alpha is
+	// even and beta is odd.
 	// The invariant maintained from here on is: 2a = u*2*alpha - v*beta.
 
+	//while (a > 0) { //This is just a counter as a is never used. 
+	//	a = a >> 1;
 	#pragma unroll 1
 	for (int i=0; i<64; i++) {
-		if ((u & 1) == 0) {
-			u = u >> 1; v = v >> 1; // Delete a common factor of 2 in u and v.
-		}
+		if ((u & 1) == 0) { // Delete a common
+			u = u >> 1; v = v >> 1; // factor of 2 in
+		} // u and v.
 		else {
-			/* We want to set u = (u + beta) >> 1, but that can overflow, so we use Dietz's method. */
+			/* We want to set u = (u + beta) >> 1, but
+			that can overflow, so we use Dietz's method. */
 			u = ((u ^ beta) >> 1) + (u & beta);
 			v = (v >> 1) + alpha; //v>>1 happens in both cases, this just also sets the highest bit to 1
 		}
@@ -138,6 +153,7 @@ __device__ __forceinline__ unsigned long long modul64(unsigned long long x, unsi
 	//If we limit z to being less 2^63, then x will always have a 0 first bit (as x < z)
 	//In which case t will always be 0, so is not needed. 
 	//Even when we shift x left (double it) after we subtract z it will never have its first bit set. 
+
 
 	//long long t;
 	#ifdef PRINT
@@ -262,10 +278,11 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 		printer = true;
 	}
 
-	const unsigned long long b = KernelP[S] + lowGPU[0]; //Lowest prime sent to GPU + offsets. Saves memory as offsets are ints rather than longs
+	const unsigned long long b = KernelP[S] + lowGPU[0]; //We need to add low now
 	const unsigned long long oneMS = modul64(1, 0, b);
 
 	unsigned long long bprime = 0;
+	//unsigned long long rInv = 1;
 
 	#ifdef PRINT
 	int montmuls = 0;
@@ -300,8 +317,14 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 	}
 	#endif
 
+	//beginModul = clock();
 	unsigned long long KernelBase = modul64(base[0], 0, b);
 	unsigned long long newKB = oneMS;
+
+	//endModul = clock();
+	//time_spent = (endModul - beginModul);
+	//modultime += time_spent;
+	//modul = modul + 2;
 
 	unsigned int mlo = (unsigned int)b;
 	unsigned int mhi = (unsigned int)(b >> 32);
@@ -310,10 +333,45 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 
 	//We now deal with b^Q for subsequences. 
 	for (int qq = 0; qq < *Q; qq++) {
+		//beginMont = clock();
 		newKB = montmul(KernelBase, newKB, mlo, mhi, mprimelo, mprimehi);
+		//newKB = montmul64(KernelBase, newKB, b, bprime);
+		//endMont = clock();
+		//time_spent = (endMont - beginMont);
+		//montmultime += time_spent;
+		//montmuls++;
 	}
 
+	//unsigned long long plo = newKB * rInv;
+	//unsigned long long phi = __umul64hi(newKB, rInv);
+
+
+	//beginModul = clock();
+	//newKB = modul64(phi, plo, b);
+
+	//endModul = clock();
+	//time_spent = (endModul - beginModul);
+	//modultime += time_spent;
+	//modul++;
+
+	//unsigned long long newKB2 = newKB;
+
+
+	//newKB = binExtEuclid(newKB, b);
+
+
 	unsigned long long js = oneMS;
+
+	//beginModul = clock();
+	//Convert js to montgomery space
+	//js = modul64(js, 0, b);
+	//Convert newKB back into Montgomery space
+	//newKB = modul64(newKB, 0, b);
+	//endModul = clock();
+	//time_spent = (endModul - beginModul);
+	//modultime += time_spent;
+	//modul = modul + 2;
+
 
 	//Do a dry run through the baby steps to find the free positions in the hash table
 	#ifdef PRINT
@@ -323,9 +381,18 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 	unsigned int hash = 0;
 
 	for (int j = 0; j < m; j++) {
+
 		hash = (int)js & (m - 1);
+
+		//if ((bits[Sints + (hash / 32)] & (1 << (hash & 31))) == 0) {
+		//hashKeys[(Sm + hash1)] = (js & 0xFFFF0000) + 0x0000FFFF;
+		//	bits[Sints + (hash / 32)] += (1 << (hash & 31));
+		//}
 		bits[Sints + (hash >> 5)] |= (1 << (hash & 31));
+
 		js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
+		//js = montmul64(js, newKB, b, bprime);
+
 	}
 
 	#ifdef PRINT
@@ -340,10 +407,12 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 	//New method - pre-populate with non-collision elements. Backfill the spaces.
 	js = oneMS;
 	int lookups = 0;
+	//int hash = 0;
 	int store = 0;
 	int key = 0;
 	int pointer = 0;
 	int firstFree = 0; //The first memory cell that doesn't head a linked list
+	//int bitArrayCounter = 0;
 
 	for (int j = 0; j < m; j++) {
 
@@ -352,11 +421,33 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 
 		key = hashKeys[(Sm + hash)];
 
+		//if (((bits[Sints + (hash / 32)] >> (hash&31)) & 1) == 1) {
+		//if (key == 0) {
+		//You were the element stored here, so subtract the 1
+		//store = store;
+		//bits[Sints + (hash / 32)] -= (1 << (hash & 31));
+		//}
+
+		//else {
 		if (key != 0) {
 			//You were a collision into this bucket. Find somewhere to live, and update the pointer
+			//key = hashKeys[(Sm + hash)];
+
+			//while ((hashKeys[Sm + firstFree] != 0) || (((bits[Sints + (firstFree / 32)] >> (firstFree & 31)) & 1) == 1)) {
 			while (((bits[Sints + (firstFree >> 5)] >> (firstFree & 31)) & 1) == 1) {
 				firstFree++;
 			}
+			//Could we do this with bfind instead?
+
+			//for (int i = bitArrayCounter; i < (m >> 5); i++) {
+			//	if (bits[Sints + i] != 0xFFFFFFFF) {
+					//Find the position of the first zero, and turn it into a 1
+			//		int pos = __clz(bits[Sints + i]);
+
+			//		break;
+			//	}
+			//	bitArrayCounter = i;
+			//}
 
 			hashKeys[(Sm + firstFree)] = ((store & 0xFFFF0000) + ((key & 0x0000FFFF) | 0x00008000)); //Store this new data, with the pointer from the head. We're now 2nd in this linked list
 			store = (key & 0xFFFF0000) + firstFree + m;
@@ -367,11 +458,78 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 		hashKeys[(Sm + hash)] = store; //Update the linked list head, either with new data and a null pointer, or an updated pointer
 
 		js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
+		//js = montmul64(js, newKB, b, bprime);
+
 
 	}
 
+
 	//Finished calculating the hash table --------------------------------------------------------------------
 
+	////Try to populate our new hash table array ------------------------------------------------------------
+	////New method - first m buckets (0 to (m-1)) are the beginning of linked lists. Buckets m to (2m-1) are for the collisions
+	//int lookups = 0;
+	//int hash = 0;
+	//int firstFree = m; //The first memory cell that doesn't head a linked list
+	//int store = 0;
+	//int key = 0;
+	//int pointer = 0;
+
+	//for (int j = 0; j<m; j++) {
+
+	//	hash = js & (m - 1);
+	//	store = js & 0xFFFF0000; //This blanks off the last 16 bits. This will contain our pointer
+
+	//							 //beginLoop = clock();
+
+	//							 //beginInsert = clock();
+
+	//							 //int key = hashKeys[(Sm + hash)];
+
+	//	if ((bits[Sints + (hash / 32)] & (1 << (hash & 31))) == 0) {
+	//		//if (set == 0) {
+	//		//if (key == 0) {
+	//		//This linked list contains nothing yet, so add the element, and a zero pointer
+	//		key = store;
+	//		bits[Sints + (hash / 32)] += 1 << (hash & 31);
+	//	}
+
+	//	//if (set != 0) {
+	//	else {
+	//		key = hashKeys[(Sm + hash)];
+
+	//		//This linked list has at least one element in it. Copy the pointer, put that in our data.
+	//		pointer = key & 0x0000FFFF; //This removes the top 16 bits which contain the data, just leaves the pointer.
+	//		key = (key & 0xFFFF0000) + firstFree; //Update the original data with the new pointer to this data
+
+	//											  //We could gather these up in shared memory and write them out every so often. 
+	//		hashKeys[(Sm + firstFree)] = (store + pointer); //Store this new data, with the pointer from the head. We're now 2nd in this linked list
+
+	//		firstFree++; //Update the location of next free memory cell
+	//	}
+
+
+	//	//beginInsert = clock();
+	//	hashKeys[(Sm + hash)] = key;
+	//	//endInsert = clock();
+	//	//time_spent = (endInsert - beginInsert);
+	//	//inserttime += time_spent;
+	//	//inserts++;
+
+	//	//beginMont = clock();
+	//	js = montmul(js, newKB, b, bprime);
+	//	//endMont = clock();
+	//	//time_spent = (endMont - beginMont);
+	//	//montmultime += time_spent;
+	//	//montmultime1 += time_spent;
+
+	//	//montmuls++;
+	//	//montmuls1++;
+
+	//}
+
+
+	////Finished calculating the hash table --------------------------------------------------------------------
 
 	#ifdef PRINT
 	end = clock();
@@ -382,16 +540,29 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 	begin = clock();
 	#endif
 
+	//Compute KernelBase^-m (mod b)
+	//unsigned long long c1 = modul64(newKB2, 0, b);
+	//modul++;
+
 	//c1  should be KernelBase^Q^-1 (mod b) computed earlier
 	//Now repeatedly square it as m is a power of two
 
 	unsigned long long c1 = newKB;
 
 	for (int t = 0; t < shift; t++) {
+		//beginMont = clock();
 		c1 = montmul(c1, c1, mlo, mhi, mprimelo, mprimehi);
+		//c1 = montmul64(c1, c1, b, bprime);
+		//endMont = clock();
+		//time_spent = (endMont - beginMont);
+		//montmultime += time_spent;
+		//montmuls++;
 	}
 
 	int output = -1;
+
+	//int tMin = tMin[0];
+	//int tMax = tMax[0];
 
 	#ifdef PRINT
 	if (printer) {
@@ -403,14 +574,22 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 	int countmuls = tMin[0];
 	#ifdef PRINT
 	int giant = 0;
+	//	int collisions = 0;
 	int maxProbe = 0;
 	#endif
+	//	float avgProbe = 0;
 
 	unsigned long long fixedBeta = 0;
 	unsigned long long beta = oneMS;
 
 	for (int t = 0; t < tMin[0]; t++) {
+		//beginMont = clock();
 		beta = montmul(beta, c1, mlo, mhi, mprimelo, mprimehi);
+		//beta = montmul64(beta, c1, b, bprime);
+		//endMont = clock();
+		//time_spent = (endMont - beginMont);
+		//montmultime += time_spent;
+		//montmuls++;
 	}
 
 	int leg1;
@@ -419,6 +598,9 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 	int leg = 1;
 
 	int probe = 0;
+
+	//int hits = 0;
+
 	int thisk = 0;
 	int corek = 0;
 	int lastk = 0;
@@ -426,62 +608,119 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 
 	//Work through the matrix of kn values
 	for (int k = 0; k < *minSubs; k++) {
-		while (k < *minSubs) {
+		//while (k < *minSubs) {
 			lastk = thisk;
 			thisk = knmatrix[k* *rowOffset];
 			if (thisk != lastk) {
+				#ifdef PRINT
+				beginLeg = clock();
+				#endif
 				leg1 = legendre(thisk, b);
 				leg2 = !(leg1^leg2fixed); //Rather than use k*base, use the multiplicative property of legendre to save any overflows
-				#ifdef PRINT
+#ifdef PRINT
 				leg = leg + 1;
 				endLeg = clock();
 				time_spent = (endLeg - beginLeg);
 				legtime += time_spent;
-				#endif		
+#endif		
 				fixedBeta = modul64(thisk, 0, b);
 				fixedBeta = montmul(fixedBeta, beta, mlo, mhi, mprimelo, mprimehi);
+				//fixedBeta = montmul64(fixedBeta, beta, b, bprime);
 			}
 
-			if (leg1 || leg2) {
-				remainder = knmatrix[(k* *rowOffset) + 1];
-				if ((remainder % 2 == 0 && leg1) || (remainder % 2 == 1 && leg2)) {
-					break;
-				}
-			}
-			k++;
-		}
+			remainder = knmatrix[(k* *rowOffset) + 1];
 
+			//	break;
+			//}
+			//k++;
+		//}
 
 		if ((remainder % 2 == 0 && leg1 == 1) || (remainder % 2 == 1 && leg2 == 1)) {
 			//We need to do something
 			unsigned long long sB = fixedBeta;
 			for (int rem = 0; rem < remainder; rem++) {
 				sB = montmul(sB, KernelBase, mlo, mhi, mprimelo, mprimehi);
+				//sB = montmul64(sB, KernelBase, b, bprime);
 			}
 
 			for (int t = tMin[0]; t < tMax[0]; t++) {
+				//if (t == 0) {
+				//	t++;
+				//}
 				sB = montmul(sB, c1, mlo, mhi, mprimelo, mprimehi);
 				#ifdef PRINT
 				giant++;
 				#endif
 
 				//Check if beta is in js
+				//hash = sB & (m - 1);
+
 				probe = 0;
 				pointer = (int)sB & (m - 1);
 
+				//while (true) {
+
+				//	//This was quicker with the bit array in the past - it now appears to be faster without using the bit array
+				//	int key = hashKeys[(Sm + pointer)];
+				//	lookups++;
+
+				//	probe++;
+				//	if (probe > maxProbe) {
+				//		maxProbe = probe;
+				//	}
+
+				//	pointer = key & 0x0000FFFF; //Remove the data, leave the pointer
+				//	key = key & 0xFFFF0000; //Remove the pointer, leave the data
+
+				//	if (((int)sB & 0xFFFF0000) == key) {
+
+				//		unsigned long long jsnew = oneMS;
+
+				//		for (int jval = 0; jval < m; jval++) {
+				//			if (jsnew == sB) {
+				//				output = t * m + jval;
+				//				pointer = 0;
+				//				break;
+				//			}
+
+				//			jsnew = montmul(jsnew, newKB, b, bprime);
+
+				//		}
+				//		//printf("Match in S %d. t=%d, hash=%d, probe=%d beta=%llu rem=%d. Output will be %llu | %d*%d^%d-1\n", S, t, hash, probe, beta, remainder, b, thisk, *Base, ((output*Q) + remainder));
+
+				//	}
+
+				//	if (pointer == 0) {
+				//		break;
+				//	}
+
+				//}
+
+
+
 				while (true) {
+
+					//Surely this must be faster on some cards - it will save us some memory transactions!
+					//if ((((bits[Sints + (pointer / 32)] >> (pointer & 31)) & 1) == 0) && probe == 0) {
+					//	break;
+					//}
 
 					//This was quicker with the bit array in the past - it now appears to be faster without using the bit array
 					key = hashKeys[(Sm + pointer)];
 					lookups++;
-					probe++;
 
+					//if (printer && k == 6) {
+					//	printf("Probe = %d. Data = %d. Pointer = %d.\n", probe, (key & 0xFFFF0000), (key & 0x0000FFFF));
+					//}
+
+					probe++;
 					#ifdef PRINT
 					if (probe > maxProbe) {
 						maxProbe = probe;
 					}
 					#endif
-					
+
+
 					pointer = (key & 0x0000FFFF); //Remove the data, leave the pointer
 					key = key & 0xFFFF0000; //Remove the pointer, leave the data
 
@@ -498,6 +737,7 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 							}
 
 							js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
+							//js = montmul64(js, newKB, b, bprime);
 
 						}
 						//printf("Match in S %d. t=%d, hash=%d, probe=%d beta=%llu rem=%d. Output will be %llu | %d*%d^%d-1\n", S, t, hash, probe, beta, remainder, b, thisk, *Base, ((output*Q) + remainder));
@@ -510,7 +750,21 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 
 					pointer = (pointer & 0x00007FFF) - m;
 
+					//if (probe > 15) {
+					//printf("The pointer was %d\n", pointer);
+					//	if (probe > 17) {
+					//		printf("Killed by probe length\n");
+					//			for (int i = 0; i < m; i++) {
+					//				printf("Hash[%d] = Data: %d, Pointer: %d\n", i, (hashKeys[Sm + i]) & 0xFFFF0000, (hashKeys[Sm + i]) & 0x0000FFFF);
+					//			}
+					//		break;
+					//	}
+					//}
+
 				}
+
+				//sB = montmul(sB, c1, mlo, mhi, mprimelo, mprimehi);
+				//sB = montmul64(sB, c1, b, bprime);
 
 
 			}
@@ -520,6 +774,9 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 			}
 		}
 
+		//if (printer) {
+		//printf("Lookups by k %d = %d\n", k, lookups);
+		//}
 	}
 
 	#ifdef PRINT
@@ -540,6 +797,16 @@ __global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int 
 		printf("Average (BSGS Cycles/lookups) was %d\n", (time_spent / lookups));
 	}
 	#endif
+
+	//begin = clock();
+
+	//NOut[S] = output; //This should contain the k-value in the top 32 bits and the n-value in the low 32 bits
+
+	//end = clock();
+	//time_spent = (end - begin);
+	//if (printer) {
+	//	printf("Cycles to write output to NOut was %d\n", time_spent);
+	//}
 
 	#ifdef PRINT
 	time_spent = (end - beginfull);
