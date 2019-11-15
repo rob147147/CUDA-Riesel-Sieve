@@ -14,4 +14,4 @@ GeForce GT 710 (366 GFLOPS, 1GB RAM, 512kb L2 cache, 19 Watts) - 1,700,000 p/sec
 GeForce 840M (790 GFLOPS, 2GB RAM, 1024kb L2 cache 30 Watts) - ?? p/sec<br />
 GeForce 960M (1403 GFLOPS, 2GB RAM, 2048kb L2 cache, 65 Watts) - ~7,700,000 p/sec (with params -b 5) <br />
 GeForce GTX 1060 (3855 GFLOPS, 6GB RAM, 1536kb L2 cache, 120 Watts) - ~11,700,000 p/sec @60% TDP ~72W (wth params -b 7) <br /> 
-GeForce GTX 2080 (8920 GFLOPS, 8GB RAM, 4096kb L2 cache, 215 Watts) - ~67,400,000 p/sec (with params -b 7 -m 4) 
+GeForce GTX 2080 (8920 GFLOPS, 8GB RAM, 4096kb L2 cache, 215 Watts) - ~74,200,000 p/sec (with params -b 8 -m 4) 
