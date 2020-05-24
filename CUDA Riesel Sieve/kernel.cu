@@ -1053,31 +1053,39 @@ int main(int argc, char* argv[])
 	unsigned long long *mark1 = (unsigned long long *)malloc(((testArraySize / 64) + 1) * sizeof(unsigned long long));
 	//testArraySize is 393216*blockScale*threadScale. This is divided by 64 as numbers are represented as bits, so 6144 longs. 
 	//3*5*7*11 = 1155, so use that as the mask, as it will always fit, though we could in theory use a larger mask, it doesn't need to cycle around.
-	unsigned long long *mask = (unsigned long long *)malloc(sizeof(unsigned long long) * 3 * 5 * 7 * 11);
-	memset(mask, 0, 3*5*7*11 * sizeof(unsigned long long));
+	unsigned long long *mask = (unsigned long long *)malloc(sizeof(unsigned long long) * 3 * 5 * 7 * 11 * 13);
+	memset(mask, 0, 3*5*7*11*13 * sizeof(unsigned long long));
 	//Assume the first element =0 mod 1155
-	for (int k = 0; k < 73920; k += 3) {
+	int limit = 3 * 5 * 7 * 11 * 13 * 64;
+	for (int k = 0; k < limit; k += 3) {
 		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
 		int intbool = k / 64; //Find the right int
 		int intshift = k & 63; //Work out the shift
 
 		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
 	}
-	for (int k = 0; k < 73920; k += 5) {
+	for (int k = 0; k < limit; k += 5) {
 		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
 		int intbool = k / 64; //Find the right int
 		int intshift = k & 63; //Work out the shift
 
 		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
 	}
-	for (int k = 0; k < 73920; k += 7) {
+	for (int k = 0; k < limit; k += 7) {
 		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
 		int intbool = k / 64; //Find the right int
 		int intshift = k & 63; //Work out the shift
 
 		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
 	}
-	for (int k = 0; k < 73920; k += 11) {
+	for (int k = 0; k < limit; k += 11) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
+	}
+	for (int k = 0; k < limit; k += 13) {
 		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
 		int intbool = k / 64; //Find the right int
 		int intshift = k & 63; //Work out the shift
@@ -1372,16 +1380,16 @@ void generateGPUPrimes(unsigned int *KernelP1, unsigned long long low, unsigned 
 	//mask[14] = 0x3496692cd259a4b3;
 	//mask[7] = 0x496692cd259a4b34;
 
-	unsigned int offset = low % 1155;
-	offset = (offset * 767) % 1155;
+	unsigned int offset = low % 15015;
+	offset = (offset * 12317) % 15015;
 
 
 	for (int i = 0; i < ((testArraySize / 64) + 1); i++) {
 		mark1[i] = mask[offset];
 		//cout << mark1[i] << endl;
 		offset++;;
-		if (offset > 1154) {
-			offset = offset - 1155;
+		if (offset > 15014) {
+			offset = offset - 15015;
 		}
 	}
 
@@ -1418,8 +1426,8 @@ void generateGPUPrimes(unsigned int *KernelP1, unsigned long long low, unsigned 
 	unsigned int totalTouches = 0;
 
 	begin = clock();
-	//Start at 4 now as we deal with 3,5,7,11 with masks.
-	for (int i = 4; i < primeCount; i++) {
+	//Start at 5 now as we deal with 3,5,7,11,13 with masks.
+	for (int i = 5; i < primeCount; i++) {
 		unsigned int smallPrime = smallP[i];
 		unsigned int mod = low % smallPrime;
 		unsigned int touch = 0;
