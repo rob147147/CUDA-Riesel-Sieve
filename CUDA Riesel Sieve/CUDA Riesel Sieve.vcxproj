@@ -191,11 +191,11 @@ copy "$(CudaToolkitBinDir)\cudart*.dll" "$(OutDir)"</Command>
       <GenerateLineInfo>true</GenerateLineInfo>
       <GenerateRelocatableDeviceCode>true</GenerateRelocatableDeviceCode>
       <Runtime>MT</Runtime>
-      <Optimization>O2</Optimization>
+      <Optimization>O3</Optimization>
       <FastMath>true</FastMath>
       <GPUDebugInfo>false</GPUDebugInfo>
       <Keep>true</Keep>
-      <MaxRegCount>62</MaxRegCount>
+      <MaxRegCount>72</MaxRegCount>
     </CudaCompile>
     <CudaLink>
       <Optimization>O2</Optimization>

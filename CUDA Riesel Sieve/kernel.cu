@@ -1,8 +1,4 @@
-//Complete - Read in an ABCD file, find Q, split into subsequences
-//Complete - CUDA code with correct outputs
-
-//TODO - Scale hash table to the size of GPU RAM
-
+//TODO - Validate factors - first against input file, then to see if factor is correct.
 
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
@@ -20,16 +16,15 @@
 
 using namespace std;
 
-void generateGPUPrimes(unsigned long long *KernelP, unsigned long long low, unsigned int *smallP, int testArraySize, int primeCount, int arraySize, unsigned int *mark1);
+void generateGPUPrimes(unsigned int *KernelP1, unsigned long long low, unsigned int *smallP, int testArraySize, int primeCount, int arraySize, unsigned long long *mark1, unsigned long long *mask);
 
 #define PRINT true
-//#undef PRINT
+#undef PRINT
 
-int *dev_a = 0; //NOut
-unsigned long long *dev_b = 0; //KernelP
+unsigned int *dev_b = 0; //KernelP
 int *dev_c = 0; //kns
-				//__constant__ int dev_c[512];
 __constant__ int base[1]; //Base
+__constant__ unsigned long long lowGPU[1]; //
 int *dev_f; //counterIn
 int *dev_g = 0; //HashTable Keys
 int *dev_h = 0; //HashTableElements
@@ -67,7 +62,6 @@ __device__ __forceinline__ int legendre(unsigned int a, unsigned long long p) {
 			}
 		}
 		//Swap x and y
-		//t = x, x = y, y = t;
 		x = x ^ y;
 		y = x ^ y;
 		x = x ^ y;
@@ -81,28 +75,23 @@ __device__ __forceinline__ int legendre(unsigned int a, unsigned long long p) {
 }
 
 
-__device__  __forceinline__ void xbinGCDnew(unsigned long long beta, unsigned long long &u, unsigned long long &v)
+__device__  __forceinline__ void xbinGCDnew(unsigned long long beta, unsigned long long &v)
 {
 	unsigned long long alpha = 9223372036854775808;
-	//unsigned long long a = 9223372036854775808;
-	//u = 1; v = 0;
-	//alpha = a;
-	// Note that alpha is
-	// even and beta is odd.
+	unsigned long long u = 1;
+	// Note that alpha is even and beta is odd.
 	// The invariant maintained from here on is: 2a = u*2*alpha - v*beta.
 
-	//while (a > 0) { //This is just a counter as a is never used. 
-	//	a = a >> 1;
 	#pragma unroll 1
 	for (int i=0; i<64; i++) {
-		if ((u & 1) == 0) { // Delete a common
-			u = u >> 1; v = v >> 1; // factor of 2 in
-		} // u and v.
+		v = v >> 1;
+		if ((u & 1) == 0) {
+			u = u >> 1; // Delete a common factor of 2 in u and v.
+		}
 		else {
-			/* We want to set u = (u + beta) >> 1, but
-			that can overflow, so we use Dietz's method. */
+			/* We want to set u = (u + beta) >> 1, but that can overflow, so we use Dietz's method. */
 			u = ((u ^ beta) >> 1) + (u & beta);
-			v = (v >> 1) + alpha; //v>>1 happens in both cases, this just also sets the highest bit to 1
+			v += alpha; //v>>1 happens in both cases, this just also sets the highest bit to 1
 		}
 	}
 }
@@ -152,7 +141,6 @@ __device__ __forceinline__ unsigned long long modul64(unsigned long long x, unsi
 	//In which case t will always be 0, so is not needed. 
 	//Even when we shift x left (double it) after we subtract z it will never have its first bit set. 
 
-
 	//long long t;
 	#ifdef PRINT
 	if (x >= z) {
@@ -188,44 +176,46 @@ __device__ __forceinline__ unsigned long long montmul(unsigned long long abar, u
 	unsigned int u2 = 0;
 	unsigned int u3 = 0;
 
-	unsigned int tm0 = 0;
-	unsigned int tm1 = 0;
 
 	//We need to calculate all 128 bits of t = abar * bbar. Add straight to u
 	//PTX Version 1
-	asm("mul.hi.u32 %1, %6, %8;\n\t" //Bits 32-64 (u1)
-		"mul.lo.u32 %2, %7, %9;\n\t" //Bits 65-96 (u2)
-		"mul.lo.u32 %0, %6, %8; \n\t" //Lowest 32 bits of u (u0)
-		"mad.lo.cc.u32 %1, %6, %9, %1;\n\t" //Add the crossproduct to u1. Set the carry out
-		"madc.hi.cc.u32 %2, %6, %9, %2;\n\t" //Add the crossproduct to u2. Set the carry out, and use the carry in
-		"madc.hi.u32 %3, %7, %9, %3;\n\t" //Bits 97-128 plus any carry out (u3)
-		"mad.lo.cc.u32 %1, %7, %8, %1;\n\t" //Add the other crossproduct to u1. Set the carry out
-		"madc.hi.cc.u32 %2, %7, %8, %2;\n\t" //Add the other crossproduct to u2. Set the carry out, and use the carry in
+	asm("{.reg .u32 treg1;\n\t"              // temp reg t1
+		".reg.u32 treg2; \n\t"              // temp reg t2
+		"mul.hi.u32 %1, %4, %6;\n\t" //Bits 32-64 (u1)
+		"mul.lo.u32 %2, %5, %7;\n\t" //Bits 65-96 (u2)
+		"mul.lo.u32 %0, %4, %6; \n\t" //Lowest 32 bits of u (u0)
+		"mad.lo.cc.u32 %1, %4, %7, %1;\n\t" //Add the crossproduct to u1. Set the carry out
+		"madc.hi.cc.u32 %2, %4, %7, %2;\n\t" //Add the crossproduct to u2. Set the carry out, and use the carry in
+		"madc.hi.u32 %3, %5, %7, %3;\n\t" //Bits 97-128 plus any carry out (u3)
+		"mad.lo.cc.u32 %1, %5, %6, %1;\n\t" //Add the other crossproduct to u1. Set the carry out
+		"madc.hi.cc.u32 %2, %5, %6, %2;\n\t" //Add the other crossproduct to u2. Set the carry out, and use the carry in
 		"addc.u32 %3, %3, 0;\n\t" //Add the potential carry into u3
 
 	//Now we calculate t*mprime & mask. I.e. the low 64 bits
-		"mul.hi.u32 %5, %0, %12;\n\t" //tm1
-		"mul.lo.u32 %4, %0, %12;\n\t" //tm0 = lo part of u0*mprimelo
-		"mad.lo.u32 %5, %0, %13, %5;\n\t" //Add the lo part of the crossproduct to tm1. u0*mprimehi
-		"mad.lo.u32 %5, %1, %12, %5;\n\t" //Add the lo part of the other crossproduct to tm1 u1*mprimelo
+		"mul.lo.u32 treg2, %0, %11;\n\t" //Add the lo part of the crossproduct to tm1. u0*mprimehi
+		"mad.lo.u32 treg2, %1, %10, treg2;\n\t" //Add the lo part of the other crossproduct to tm1 u1*mprimelo
+		"mul.lo.u32 treg1, %0, %10;\n\t" //tm0 = lo part of u0*mprimelo
+		"mad.hi.u32 treg2, %0, %10, treg2;\n\t" //tm1
 
 	//Multiple tm*m to get the 128 bit product, and add it to u
-		"mad.lo.cc.u32 %0, %4, %10, %0;\n\t" //Add the lo part of tm.lo*m*lo to u0. Set the carry out
-		"madc.hi.cc.u32 %1, %4, %10, %1;\n\t" //Add the hi part of tm.lo*m*lo to u1. Set the carry out, and use the carry in
-		"madc.lo.cc.u32 %2, %5, %11, %2;\n\t" //Add the lo part of tm.hi*m*hi to u2. Set the carry out, and use the carry in
-		"madc.hi.cc.u32 %3, %5, %11, %3;\n\t" //Add the hi part of tm.hi*m*hi to u3. Use the carry in, and set carry out for overflow detection
+		"mad.lo.cc.u32 %0, treg1, %8, %0;\n\t" //Add the lo part of tm.lo*m*lo to u0. Set the carry out
+		"madc.hi.cc.u32 %1, treg1, %8, %1;\n\t" //Add the hi part of tm.lo*m*lo to u1. Set the carry out, and use the carry in
+		"madc.lo.cc.u32 %2, treg2, %9, %2;\n\t" //Add the lo part of tm.hi*m*hi to u2. Set the carry out, and use the carry in
+		"madc.hi.cc.u32 %3, treg2, %9, %3;\n\t" //Add the hi part of tm.hi*m*hi to u3. Use the carry in, and set carry out for overflow detection
 		"addc.u32 %0, 0, 0;\n\t" //Put the overflow flag into u0
-		"mad.lo.cc.u32 %1, %4, %11, %1;\n\t" //Add the lo part of tm.lo*m*hi to u1. Set the carry out
-		"madc.hi.cc.u32 %2, %4, %11, %2;\n\t" //Add the hi part of tm.lo*m*hi to u2. Set the carry out, and use the carry in
+		"mad.lo.cc.u32 %1, treg1, %9, %1;\n\t" //Add the lo part of tm.lo*m*hi to u1. Set the carry out
+		"madc.hi.cc.u32 %2, treg1, %9, %2;\n\t" //Add the hi part of tm.lo*m*hi to u2. Set the carry out, and use the carry in
 		"addc.cc.u32 %3, %3, 0;\n\t" //Add the potential carry into u3
 		"addc.u32 %0, %0, 0;\n\t" //Put the overflow flag into u0
-		"mad.lo.cc.u32 %1, %5, %10, %1;\n\t" //Add the lo part of tm.hi*m*lo to u1. Set the carry out
-		"madc.hi.cc.u32 %2, %5, %10, %2;\n\t" //Add the hi part of tm.hi*m*lo to u2. Set the carry out, and use the carry in
+		"mad.lo.cc.u32 %1, treg2, %8, %1;\n\t" //Add the lo part of tm.hi*m*lo to u1. Set the carry out
+		"madc.hi.cc.u32 %2, treg2, %8, %2;\n\t" //Add the hi part of tm.hi*m*lo to u2. Set the carry out, and use the carry in
 		"addc.cc.u32 %3, %3, 0\n\t;" //Add the potential carry into u3
-		"addc.u32 %0, %0, 0;" //Put the overflow flag into u0
+		"addc.u32 %0, %0, 0;}" //Put the overflow flag into u0
 
-		: "=+r"(u0), "=+r"(u1), "=+r"(u2), "=+r"(u3), "=+r"(tm0), "=+r"(tm1) : "r"(alo), "r"(ahi), "r"(blo), "r"(bhi), "r"(mlo), "r"(mhi), "r"(mprimelo), "r"(mprimehi)
+		: "+r"(u0), "+r"(u1), "+r"(u2), "+r"(u3) : "r"(alo), "r"(ahi), "r"(blo), "r"(bhi), "r"(mlo), "r"(mhi), "r"(mprimelo), "r"(mprimehi)
 	);
+
+	//Look at this, we don't need to save tm0 and tm1 as they are not used after the asm. 
 
 	//We're only interested in u2 and u3
 	unsigned long long u = u3;
@@ -243,66 +233,10 @@ __device__ __forceinline__ unsigned long long montmul(unsigned long long abar, u
 
 }
 
-__device__ __forceinline__ long long binExtEuclid(long long a, long long b) {
-	long long u = b;
-	long long v = a;
-	long long r = 0;
-	long long s = 1;
-	long long x = a;
-	while (v>0) {
-		if ((u & 1) == 0) {
-			u = u >> 1;
-			r = (r + ((r & 1)*b)) >> 1;
-			//if ((r & 1) == 0) {
-			//	r = r >> 1;
-			//}
-			//else {
-			//	r = (r + b) >> 1;
-			//}
-		}
-		else {
-			if ((v & 1) == 0) {
-				v = v >> 1;
-				s = (s + ((s & 1)*b)) >> 1;
-				//if ((s & 1) == 0) {
-				//	s = s >> 1;
-				//}
-				//else {
-				//	s = (s + b) >> 1;
-				//}
-			}
-			else {
-				x = u - v;
-				if (x>0) {
-					u = x;
-					r = r - s;
-					if (r<0) {
-						r = r + b;
-					}
-				}
-				else {
-					v = x * -1;
-					s = s - r;
-					if (s<0) {
-						s = s + b;
-					}
-				}
-			}
-		}
-	}
-	if (r >= b) {
-		r = r - b;
-	}
-	if (r<0) {
-		r = r + b;
-	}
-	return(r);
-}
 
-
-
-__global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix, int *rowOffset, int *hashKeys, int *hashElements, int *hashDensity, unsigned int *bits, int *Q, int *minSubs)
+__global__ void addKernel1(unsigned int *KernelP, int *knmatrix, int *rowOffset, int *hashKeys, int *hashElements, int *hashDensity, unsigned int *bits, int *Q, int *minSubs)
 {
+	#ifdef PRINT
 	clock_t beginfull = clock();
 	clock_t begin = clock();
 
@@ -312,6 +246,7 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	clock_t end = clock();
 	int time_spent = 0;
+	#endif
 
 	//This deals with the hashTables
 	const int m = *hashElements;
@@ -329,11 +264,11 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 		printer = true;
 	}
 
-	const unsigned long long b = KernelP[S];
-	const unsigned long long oneMS = modul64(1, 0, b);
+	const unsigned long long b = KernelP[S] + lowGPU[0]; //Lowest prime sent to GPU + offsets. Saves memory as offsets are ints rather than longs
+	unsigned long long oneMS = modul64(1, 0, b); 
+	//const unsigned long long oneMS = modul64(18446744073709551614, 0, b);
 
 	unsigned long long bprime = 0;
-	unsigned long long rInv = 1;
 
 	#ifdef PRINT
 	int montmuls = 0;
@@ -356,26 +291,20 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	begin = clock();
 	#endif
 
-	xbinGCDnew(b, rInv, bprime);
+	xbinGCDnew(b, bprime);
 
 	#ifdef PRINT
 	end = clock();
 	time_spent = (end - begin);
 	if (printer) {
 		//Check GCD has worked
-		printf("2*inp*rInv - b*bprime = %llu\n", (2 * 9223372036854775808 * rInv - (b*bprime)));
+		//printf("2*inp*%llu - %llu*%llu = %llu\n", rInv, b, bprime, (2 * 9223372036854775808 * rInv - (b*bprime)));
 		printf("Cycles to do xbinGCD was %d\n", time_spent);
 	}
 	#endif
 
-	//beginModul = clock();
 	unsigned long long KernelBase = modul64(base[0], 0, b);
 	unsigned long long newKB = oneMS;
-
-	//endModul = clock();
-	//time_spent = (endModul - beginModul);
-	//modultime += time_spent;
-	//modul = modul + 2;
 
 	unsigned int mlo = (unsigned int)b;
 	unsigned int mhi = (unsigned int)(b >> 32);
@@ -384,58 +313,10 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	//We now deal with b^Q for subsequences. 
 	for (int qq = 0; qq < *Q; qq++) {
-		//beginMont = clock();
 		newKB = montmul(KernelBase, newKB, mlo, mhi, mprimelo, mprimehi);
-		//newKB = montmul64(KernelBase, newKB, b, bprime);
-		//endMont = clock();
-		//time_spent = (endMont - beginMont);
-		//montmultime += time_spent;
-		//montmuls++;
 	}
-
-	//Save this now so we can use it later. Will save a call to modul
-	unsigned long long c1 = newKB;
-
-	unsigned long long plo = newKB * rInv;
-	unsigned long long phi = __umul64hi(newKB, rInv);
-
-
-	//beginModul = clock();
-	newKB = modul64(phi, plo, b);
-	//endModul = clock();
-	//time_spent = (endModul - beginModul);
-	//modultime += time_spent;
-	//modul++;
-
-	//unsigned long long newKB2 = newKB;
-
-	#ifdef PRINT
-	begin = clock();
-	#endif
-
-	newKB = binExtEuclid(newKB, b);
-
-	#ifdef PRINT
-	end = clock();
-	time_spent = (end - begin);
-	if (printer) {
-		printf("Cycles to do binExtEuclid was %d\n", time_spent);
-	}
-	#endif
-
 
 	unsigned long long js = oneMS;
-
-	//beginModul = clock();
-	//Convert js to montgomery space
-	//js = modul64(js, 0, b);
-	//Convert newKB back into Montgomery space
-	newKB = modul64(newKB, 0, b);
-	//endModul = clock();
-	//time_spent = (endModul - beginModul);
-	//modultime += time_spent;
-	//modul = modul + 2;
-
 
 	//Do a dry run through the baby steps to find the free positions in the hash table
 	#ifdef PRINT
@@ -445,18 +326,9 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	unsigned int hash = 0;
 
 	for (int j = 0; j < m; j++) {
-
 		hash = (int)js & (m - 1);
-
-		//if ((bits[Sints + (hash / 32)] & (1 << (hash & 31))) == 0) {
-		//hashKeys[(Sm + hash1)] = (js & 0xFFFF0000) + 0x0000FFFF;
-		//	bits[Sints + (hash / 32)] += (1 << (hash & 31));
-		//}
 		bits[Sints + (hash >> 5)] |= (1 << (hash & 31));
-
 		js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
-		//js = montmul64(js, newKB, b, bprime);
-
 	}
 
 	#ifdef PRINT
@@ -471,49 +343,25 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	//New method - pre-populate with non-collision elements. Backfill the spaces.
 	js = oneMS;
 	int lookups = 0;
-	//int hash = 0;
 	int store = 0;
 	int key = 0;
 	int pointer = 0;
 	int firstFree = 0; //The first memory cell that doesn't head a linked list
-	//int bitArrayCounter = 0;
 
 	for (int j = 0; j < m; j++) {
 
 		hash = (int)js & (m - 1);
-		store = (js & 0xFFFF0000) + 0x0000FFFF; //This blanks off the last 16 bits and adds a null pointer. This will contain our pointer
+		store = (js & 0xFFFF0000) + 0x00007FFF; //This blanks off the last 16 bits and adds a null pointer. This will contain our pointer
 
 		key = hashKeys[(Sm + hash)];
 
-		//if (((bits[Sints + (hash / 32)] >> (hash&31)) & 1) == 1) {
-		//if (key == 0) {
-		//You were the element stored here, so subtract the 1
-		//store = store;
-		//bits[Sints + (hash / 32)] -= (1 << (hash & 31));
-		//}
-
-		//else {
 		if (key != 0) {
 			//You were a collision into this bucket. Find somewhere to live, and update the pointer
-			//key = hashKeys[(Sm + hash)];
-
-			//while ((hashKeys[Sm + firstFree] != 0) || (((bits[Sints + (firstFree / 32)] >> (firstFree & 31)) & 1) == 1)) {
 			while (((bits[Sints + (firstFree >> 5)] >> (firstFree & 31)) & 1) == 1) {
 				firstFree++;
 			}
-			//Could we do this with bfind instead?
 
-			//for (int i = bitArrayCounter; i < (m >> 5); i++) {
-			//	if (bits[Sints + i] != 0xFFFFFFFF) {
-					//Find the position of the first zero, and turn it into a 1
-			//		int pos = __clz(bits[Sints + i]);
-
-			//		break;
-			//	}
-			//	bitArrayCounter = i;
-			//}
-
-			hashKeys[(Sm + firstFree)] = ((store - 0x0000FFFF) + (key & 0x0000FFFF)); //Store this new data, with the pointer from the head. We're now 2nd in this linked list
+			hashKeys[(Sm + firstFree)] = ((store & 0xFFFF0000) + ((key & 0x0000FFFF) | 0x00008000)); //Store this new data, with the pointer from the head. We're now 2nd in this linked list
 			store = (key & 0xFFFF0000) + firstFree + m;
 			firstFree++;
 
@@ -522,78 +370,11 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 		hashKeys[(Sm + hash)] = store; //Update the linked list head, either with new data and a null pointer, or an updated pointer
 
 		js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
-		//js = montmul64(js, newKB, b, bprime);
-
 
 	}
 
-
 	//Finished calculating the hash table --------------------------------------------------------------------
 
-	////Try to populate our new hash table array ------------------------------------------------------------
-	////New method - first m buckets (0 to (m-1)) are the beginning of linked lists. Buckets m to (2m-1) are for the collisions
-	//int lookups = 0;
-	//int hash = 0;
-	//int firstFree = m; //The first memory cell that doesn't head a linked list
-	//int store = 0;
-	//int key = 0;
-	//int pointer = 0;
-
-	//for (int j = 0; j<m; j++) {
-
-	//	hash = js & (m - 1);
-	//	store = js & 0xFFFF0000; //This blanks off the last 16 bits. This will contain our pointer
-
-	//							 //beginLoop = clock();
-
-	//							 //beginInsert = clock();
-
-	//							 //int key = hashKeys[(Sm + hash)];
-
-	//	if ((bits[Sints + (hash / 32)] & (1 << (hash & 31))) == 0) {
-	//		//if (set == 0) {
-	//		//if (key == 0) {
-	//		//This linked list contains nothing yet, so add the element, and a zero pointer
-	//		key = store;
-	//		bits[Sints + (hash / 32)] += 1 << (hash & 31);
-	//	}
-
-	//	//if (set != 0) {
-	//	else {
-	//		key = hashKeys[(Sm + hash)];
-
-	//		//This linked list has at least one element in it. Copy the pointer, put that in our data.
-	//		pointer = key & 0x0000FFFF; //This removes the top 16 bits which contain the data, just leaves the pointer.
-	//		key = (key & 0xFFFF0000) + firstFree; //Update the original data with the new pointer to this data
-
-	//											  //We could gather these up in shared memory and write them out every so often. 
-	//		hashKeys[(Sm + firstFree)] = (store + pointer); //Store this new data, with the pointer from the head. We're now 2nd in this linked list
-
-	//		firstFree++; //Update the location of next free memory cell
-	//	}
-
-
-	//	//beginInsert = clock();
-	//	hashKeys[(Sm + hash)] = key;
-	//	//endInsert = clock();
-	//	//time_spent = (endInsert - beginInsert);
-	//	//inserttime += time_spent;
-	//	//inserts++;
-
-	//	//beginMont = clock();
-	//	js = montmul(js, newKB, b, bprime);
-	//	//endMont = clock();
-	//	//time_spent = (endMont - beginMont);
-	//	//montmultime += time_spent;
-	//	//montmultime1 += time_spent;
-
-	//	//montmuls++;
-	//	//montmuls1++;
-
-	//}
-
-
-	////Finished calculating the hash table --------------------------------------------------------------------
 
 	#ifdef PRINT
 	end = clock();
@@ -601,30 +382,19 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	if (printer) {
 		printf("Cycles calculating new hash table was %d (%d inserts (baby steps) @ %d cycles average)\n", time_spent, m, time_spent / m);
 	}
-	#endif
-
 	begin = clock();
-	//Compute KernelBase^-m (mod b)
-	//unsigned long long c1 = modul64(newKB2, 0, b);
-	//modul++;
+	#endif
 
 	//c1  should be KernelBase^Q^-1 (mod b) computed earlier
 	//Now repeatedly square it as m is a power of two
 
+	unsigned long long c1 = newKB;
+
 	for (int t = 0; t < shift; t++) {
-		//beginMont = clock();
 		c1 = montmul(c1, c1, mlo, mhi, mprimelo, mprimehi);
-		//c1 = montmul64(c1, c1, b, bprime);
-		//endMont = clock();
-		//time_spent = (endMont - beginMont);
-		//montmultime += time_spent;
-		//montmuls++;
 	}
 
 	int output = -1;
-
-	//int tMin = tMin[0];
-	//int tMax = tMax[0];
 
 	#ifdef PRINT
 	if (printer) {
@@ -634,23 +404,16 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	lookups = 0;
 	int countmuls = tMin[0];
+	#ifdef PRINT
 	int giant = 0;
-	//	int collisions = 0;
-
 	int maxProbe = 0;
-	//	float avgProbe = 0;
+	#endif
 
 	unsigned long long fixedBeta = 0;
 	unsigned long long beta = oneMS;
 
 	for (int t = 0; t < tMin[0]; t++) {
-		//beginMont = clock();
 		beta = montmul(beta, c1, mlo, mhi, mprimelo, mprimehi);
-		//beta = montmul64(beta, c1, b, bprime);
-		//endMont = clock();
-		//time_spent = (endMont - beginMont);
-		//montmultime += time_spent;
-		//montmuls++;
 	}
 
 	int leg1;
@@ -659,9 +422,6 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	int leg = 1;
 
 	int probe = 0;
-
-	//int hits = 0;
-
 	int thisk = 0;
 	int corek = 0;
 	int lastk = 0;
@@ -669,109 +429,62 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 	//Work through the matrix of kn values
 	for (int k = 0; k < *minSubs; k++) {
-		//while (k < *minSubs) {
+		while (k < *minSubs) {
 			lastk = thisk;
 			thisk = knmatrix[k* *rowOffset];
 			if (thisk != lastk) {
-				beginLeg = clock();
 				leg1 = legendre(thisk, b);
 				leg2 = !(leg1^leg2fixed); //Rather than use k*base, use the multiplicative property of legendre to save any overflows
-#ifdef PRINT
+				#ifdef PRINT
 				leg = leg + 1;
 				endLeg = clock();
 				time_spent = (endLeg - beginLeg);
 				legtime += time_spent;
-#endif		
+				#endif		
 				fixedBeta = modul64(thisk, 0, b);
+				//The single line of code below lets us sieve +1 instead of -1
+				//fixedBeta = b - fixedBeta;
 				fixedBeta = montmul(fixedBeta, beta, mlo, mhi, mprimelo, mprimehi);
-				//fixedBeta = montmul64(fixedBeta, beta, b, bprime);
 			}
 
-			remainder = knmatrix[(k* *rowOffset) + 1];
+			if (leg1 || leg2) {
+				remainder = knmatrix[(k* *rowOffset) + 1];
+				if ((remainder % 2 == 0 && leg1) || (remainder % 2 == 1 && leg2)) {
+					break;
+				}
+			}
+			k++;
+		}
 
-			//if ((remainder % 2 == 0 && leg1 == 1) || (remainder % 2 == 1 && leg2 == 1)) {
-			//	break;
-			//}
-			//k++;
-		//}
-
-		if ((remainder % 2 == 0 && leg1 == 1) || (remainder % 2 == 1 && leg2 == 1)) {
 			//We need to do something
 			unsigned long long sB = fixedBeta;
 			for (int rem = 0; rem < remainder; rem++) {
 				sB = montmul(sB, KernelBase, mlo, mhi, mprimelo, mprimehi);
-				//sB = montmul64(sB, KernelBase, b, bprime);
 			}
 
 			for (int t = tMin[0]; t < tMax[0]; t++) {
+				sB = montmul(sB, c1, mlo, mhi, mprimelo, mprimehi);
+				#ifdef PRINT
 				giant++;
+				#endif
 
 				//Check if beta is in js
-				//hash = sB & (m - 1);
-
 				probe = 0;
 				pointer = (int)sB & (m - 1);
 
-				//while (true) {
-
-				//	//This was quicker with the bit array in the past - it now appears to be faster without using the bit array
-				//	int key = hashKeys[(Sm + pointer)];
-				//	lookups++;
-
-				//	probe++;
-				//	if (probe > maxProbe) {
-				//		maxProbe = probe;
-				//	}
-
-				//	pointer = key & 0x0000FFFF; //Remove the data, leave the pointer
-				//	key = key & 0xFFFF0000; //Remove the pointer, leave the data
-
-				//	if (((int)sB & 0xFFFF0000) == key) {
-
-				//		unsigned long long jsnew = oneMS;
-
-				//		for (int jval = 0; jval < m; jval++) {
-				//			if (jsnew == sB) {
-				//				output = t * m + jval;
-				//				pointer = 0;
-				//				break;
-				//			}
-
-				//			jsnew = montmul(jsnew, newKB, b, bprime);
-
-				//		}
-				//		//printf("Match in S %d. t=%d, hash=%d, probe=%d beta=%llu rem=%d. Output will be %llu | %d*%d^%d-1\n", S, t, hash, probe, beta, remainder, b, thisk, *Base, ((output*Q) + remainder));
-
-				//	}
-
-				//	if (pointer == 0) {
-				//		break;
-				//	}
-
-				//}
-
-
-
 				while (true) {
-
-					//Surely this must be faster on some cards - it will save us some memory transactions!
-					//if ((((bits[Sints + (hash / 32)] >> (hash & 31)) & 1) == 0) && probe == 0) {
-					//	break;
-					//}
 
 					//This was quicker with the bit array in the past - it now appears to be faster without using the bit array
 					key = hashKeys[(Sm + pointer)];
 					lookups++;
-
-					//if (printer && k == 6) {
-					//	printf("Probe = %d. Data = %d. Pointer = %d.\n", probe, (key & 0xFFFF0000), (key & 0x0000FFFF));
-					//}
-
 					probe++;
+
+					#ifdef PRINT
 					if (probe > maxProbe) {
 						maxProbe = probe;
 					}
-
+					#endif
+					
 					pointer = (key & 0x0000FFFF); //Remove the data, leave the pointer
 					key = key & 0xFFFF0000; //Remove the pointer, leave the data
 
@@ -781,40 +494,26 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 
 						for (int jval = 0; jval < m; jval++) {
 							if (js == sB) {
-								output = t * m + jval;
+								output = (t+1) * m - jval;
+								//printf("t = %d, m = %d, jval = %d, output = %llu\n", t, m, jval, output);
 								pointer = 0x0000FFFF;
 								break;
 							}
 
 							js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
-							//js = montmul64(js, newKB, b, bprime);
 
 						}
 						//printf("Match in S %d. t=%d, hash=%d, probe=%d beta=%llu rem=%d. Output will be %llu | %d*%d^%d-1\n", S, t, hash, probe, beta, remainder, b, thisk, *Base, ((output*Q) + remainder));
 
 					}
 
-					if (pointer == 0x0000FFFF) {
+					if (((pointer >= 32767) && (probe == 1)) || (pointer == 0x0000FFFF)) {
 						break;
 					}
 
-					pointer = pointer - m;
-
-					//if (probe > 15) {
-					//printf("The pointer was %d\n", pointer);
-					//	if (probe > 17) {
-					//		printf("Killed by probe length\n");
-					//			for (int i = 0; i < m; i++) {
-					//				printf("Hash[%d] = Data: %d, Pointer: %d\n", i, (hashKeys[Sm + i]) & 0xFFFF0000, (hashKeys[Sm + i]) & 0x0000FFFF);
-					//			}
-					//		break;
-					//	}
-					//}
+					pointer = (pointer & 0x00007FFF) - m;
 
 				}
-
-				sB = montmul(sB, c1, mlo, mhi, mprimelo, mprimehi);
-				//sB = montmul64(sB, c1, b, bprime);
 
 
 			}
@@ -822,11 +521,8 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 				printf("Output will be %llu | %d*%d^%d-1. Thread %d\n", b, thisk, base[0], ((output* *Q) + remainder), S);
 				output = -1;
 			}
-		}
-
-		//if (printer) {
-		//printf("Lookups by k %d = %d\n", k, lookups);
 		//}
+
 	}
 
 	#ifdef PRINT
@@ -848,20 +544,10 @@ __global__ void addKernel1(int *NOut, unsigned long long *KernelP, int *knmatrix
 	}
 	#endif
 
-	//begin = clock();
-
-	//NOut[S] = output; //This should contain the k-value in the top 32 bits and the n-value in the low 32 bits
-
-	//end = clock();
-	//time_spent = (end - begin);
-	//if (printer) {
-	//	printf("Cycles to write output to NOut was %d\n", time_spent);
-	//}
-
-
+	#ifdef PRINT
 	time_spent = (end - beginfull);
-	//NOut[S] = time_spent;
-	NOut[S] = lookups;
+	#endif
+
 	#ifdef PRINT
 	if (printer) {
 		//printf("-------------------- Creating Hash Table --------------------\n");
@@ -896,9 +582,11 @@ int main(int argc, char* argv[])
 	unsigned long long high = 0;
 	int Qin = 0;
 	int hashTableSize = 1;
+	int verify = 1;
+	int smallPrimeScale = 256;
 
 
-	while ((inp = getopt(argc, argv, "b:hi:m:p:P:Q:t:")) != -1) {
+	while ((inp = getopt(argc, argv, "b:hi:m:p:P:Q:s:t:v:")) != -1) {
 		switch (inp) {
 		case 'b':
 			//Get the blockScale argument
@@ -919,6 +607,8 @@ int main(int argc, char* argv[])
 			cout << "-b SCALE : Scale the number of CUDA blocks per kernel by the integer argument SCALE." << endl;
 			cout << "-t SCALE : Scale the number of CUDA threads per block by the integer argument SCALE." << endl;
 			cout << "             Note that these no longer require being powers of 2. We use the formula 1<<SCALE to ensure power of 2." << endl;
+			cout << "-v 	  : Don't verify factors." << endl; 
+			cout << "-s SCALE : Scale the small primes by the integer argument SCALE. Default is 256." << endl;
 			cout << "-h       : Prints this help" << endl;
 			return 0;
 
@@ -950,9 +640,18 @@ int main(int argc, char* argv[])
 			}
 			break;
 
+		case 's':
+			smallPrimeScale = strtol(optarg, NULL, 0);
+			break;
+
 		case 't':
 			//Get the threadScale argument
 			threadScale = strtol(optarg, NULL, 0);
+			break;
+
+		case 'v': 
+			//Turn off factor verification
+			verify = 0;
 			break;
 
 		default:
@@ -1014,6 +713,7 @@ int main(int argc, char* argv[])
 	const int blocks = 128 * blockScale;
 	const int threads = 128 * threadScale;
 	const int arraySize = blocks * threads;
+	//This is based on the density of primes ~1/45 at 2^64. As we only consider odd numbers, 24 allows for roughly ~1/48 density, so we have some leeway here 
 	const int testArraySize = arraySize * 24;
 	const int hashScaling = 1;
 
@@ -1084,27 +784,6 @@ int main(int argc, char* argv[])
 	//First pass through the ABCD file to find the number of k's and max number of n's
 	int count1 = 0; //Number of k's
 	int count3 = 0; //Total number of lines
-					//ifstream myfile(abcdFile);
-					//if (myfile.is_open())
-					//{
-					//	while (getline(myfile, line))
-					//	{
-					//		count3++;
-
-					//			string::size_type n = line.find(" ");
-					//		string token = line.substr(0, n);
-					//cout << token << endl;
-
-					//If tokens[0] == "ABCD" then this defines a new k, otherwise it is a number
-					//		if (token.compare("ABCD") == 0) {
-					//			count1++;
-					//cout << "We're here!" << endl;
-					//		}
-					//	}
-					//	myfile.close();
-					//}
-
-					//else cout << "Unable to open file first time" << endl;
 
 	countKs(abcdFile, count1, count3);
 
@@ -1321,24 +1000,15 @@ int main(int argc, char* argv[])
 		}
 	}
 
-	//Print out the bit array
-	//for (int rows = 0; rows <1; rows++) {
-	//cout << matrix[rows*rowoffset] << endl;
-	//cout << matrix[(rows*rowoffset) + 1] << endl;
-	//cout << matrix[(rows*rowoffset) + 2] << endl;
-	//cout << matrix[(rows*rowoffset) + 3] << endl;
-	//cout << matrix[(rows*rowoffset) + 4] << endl;
-	//}
-
 
 	//Generate Primes -------------------------------------------------------------------------------------------
 
 	//unsigned long long *KernelP = (unsigned long long *)malloc(arraySize * sizeof(unsigned long long));
 	int *NOut;
-	unsigned long long *KernelP;
+	unsigned int *KernelP;
 	//int *NOut = (int *)malloc(arraySize * sizeof(int));
 	cudaMallocHost((void **)&NOut, arraySize * sizeof(int));
-	cudaMallocHost((void **)&KernelP, arraySize * sizeof(unsigned long long));
+	cudaMallocHost((void **)&KernelP, arraySize * sizeof(unsigned int));
 
 	//Low should be greater than the primes we use below.
 
@@ -1348,7 +1018,7 @@ int main(int argc, char* argv[])
 	//Use the idea of a segmented sieve. Generate a list of small primes first
 	//If we use too many small primes then it can affect sieving, i.e. we cant use small -p values. Check for this in future
 	clock_t begin = clock();
-	int primeCount = 16384 * 128;
+	int primeCount = 4096 * smallPrimeScale;
 	int count = 0;
 	bool *primes = (bool *)malloc(primeCount * 24 * sizeof(bool));
 	unsigned int *smallP = (unsigned int *)malloc(primeCount * sizeof(unsigned int));
@@ -1371,18 +1041,58 @@ int main(int argc, char* argv[])
 			}
 		}
 	}
+	//We could use this boolean array primes to generate a large mask. This would be useful when generating primes to send to the GPU.
+	//If we default to primecount = 16384 * smallPrimeScale, we can use this to produce a mask for 3*5*7*11*13 = 15015 rows and capture the cyclicity.
+	//Or we could just manually produce a mask using the small primes which will probably be easier.
+
 	clock_t end = clock();
 	double time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
 	cout << "Time generating small primes " << time_spent << "s" << endl;
 
 
-	unsigned int *mark1 = (unsigned int *)malloc(((testArraySize / 32) + 1) * sizeof(unsigned int));
+	unsigned long long *mark1 = (unsigned long long *)malloc(((testArraySize / 64) + 1) * sizeof(unsigned long long));
+	//testArraySize is 393216*blockScale*threadScale. This is divided by 64 as numbers are represented as bits, so 6144 longs. 
+	//3*5*7*11 = 1155, so use that as the mask, as it will always fit, though we could in theory use a larger mask, it doesn't need to cycle around.
+	unsigned long long *mask = (unsigned long long *)malloc(sizeof(unsigned long long) * 3 * 5 * 7 * 11);
+	memset(mask, 0, 3*5*7*11 * sizeof(unsigned long long));
+	//Assume the first element =0 mod 1155
+	for (int k = 0; k < 73920; k += 3) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
+	}
+	for (int k = 0; k < 73920; k += 5) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
+	}
+	for (int k = 0; k < 73920; k += 7) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
+	}
+	for (int k = 0; k < 73920; k += 11) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
+	}
+	//for (int k = 0; k < 1155; k++) {
+	//	cout << mask[k] << endl;
+	//}
 
 
 	//Try setting up the GPU just once
 
 	// Choose which GPU to run on, change this on a multi-GPU system.
-	//cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
+	cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
 		goto Error;
@@ -1399,12 +1109,6 @@ int main(int argc, char* argv[])
 	// Allocate GPU buffers for three vectors (one output, seven input). 
 	//Give all vectors same size for now, we can change this afterwards
 
-	cudaStatus = cudaMalloc((void**)&dev_a, arraySize * sizeof(int));
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
-	}
-
 	cudaStatus = cudaMalloc((void**)&dev_b, arraySize * sizeof(unsigned long long));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
@@ -1416,12 +1120,6 @@ int main(int argc, char* argv[])
 		fprintf(stderr, "cudaMalloc failed!");
 		goto Error;
 	}
-
-	//cudaStatus = cudaMalloc((void**)&dev_e, sizeof(int));
-	//if (cudaStatus != cudaSuccess) {
-	//	fprintf(stderr, "cudaMalloc failed!");
-	//	goto Error;
-	//}
 
 	cudaStatus = cudaMalloc((void**)&dev_f, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
@@ -1459,18 +1157,6 @@ int main(int argc, char* argv[])
 		goto Error;
 	}
 
-	//cudaStatus = cudaMalloc((void**)&tMin, sizeof(int));
-	//if (cudaStatus != cudaSuccess) {
-	//	fprintf(stderr, "cudaMalloc failed!");
-	//	goto Error;
-	//}
-
-	//cudaStatus = cudaMalloc((void**)&tMax, sizeof(int));
-	//if (cudaStatus != cudaSuccess) {
-	//	fprintf(stderr, "cudaMalloc failed!");
-	//	goto Error;
-	//}
-
 	cudaStatus = cudaMalloc((void**)&dev_n, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
@@ -1479,25 +1165,11 @@ int main(int argc, char* argv[])
 
 	//Copy the data to the correct GPU buffers
 
-	//Lets try storing the k values and remainders in constant memory instead
-	//cudaStatus = cudaMemcpyToSymbol(dev_c, ks2, (count1 * 3 + minSubs + 3) * sizeof(int));
-	//if (cudaStatus != cudaSuccess) {
-	//	fprintf(stderr, "cudaMemcpy to constant memory failed!");
-	//	cout << (count1 * 3 + minSubs + 3) * sizeof(int) << "bytes" << endl;
-	//	goto Error;
-	//}
 	cudaStatus = cudaMemcpy(dev_c, matrix, minSubs * rowoffset * sizeof(int), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
-		//fprintf(stderr, "cudaMemcpy to constant memory failed!");
 		cout << (count1 * 3 + minSubs + 3) * sizeof(int) << "bytes" << endl;
 		goto Error;
 	}
-
-	//cudaStatus = cudaMemcpy(dev_e, &base, sizeof(int), cudaMemcpyHostToDevice);
-	//if (cudaStatus != cudaSuccess) {
-	//	fprintf(stderr, "cudaMemcpy failed!");
-	//	goto Error;
-	//}
 
 	cudaStatus = cudaMemcpyToSymbol(base, &baseCPU, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
@@ -1529,12 +1201,6 @@ int main(int argc, char* argv[])
 		goto Error;
 	}
 
-	//cudaStatus = cudaMemcpy(tMin, &tMin, sizeof(int), cudaMemcpyHostToDevice); //minN
-	//if (cudaStatus != cudaSuccess) {
-	//	fprintf(stderr, "cudaMemcpy failed!");
-	//	goto Error;
-	//}
-
 	cudaStatus = cudaMemcpyToSymbol(tMin, &tMinCPU, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMemcpy to constant memory failed!");
@@ -1547,23 +1213,11 @@ int main(int argc, char* argv[])
 		goto Error;
 	}
 
-	//cudaStatus = cudaMemcpy(tMax, &tMax, sizeof(int), cudaMemcpyHostToDevice); //maxN
-	//if (cudaStatus != cudaSuccess) {
-	//	fprintf(stderr, "cudaMemcpy failed!");
-	//	goto Error;
-	//}
-
 	cudaStatus = cudaMemcpy(dev_n, &minSubs, sizeof(int), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMemcpy failed!");
 		goto Error;
 	}
-
-	//cudaStatus = cudaMemcpy(dev_j, bits, ((arraySize * hashTableSize * hashScaling) / 32) * sizeof(unsigned int), cudaMemcpyHostToDevice);
-	//if (cudaStatus != cudaSuccess) {
-	//	fprintf(stderr, "cudaMemcpy failed!");
-	//	goto Error;
-	//}
 
 	//Create the first set of primes for the GPU before we start
 	if (low % 2 == 0) {
@@ -1573,7 +1227,7 @@ int main(int argc, char* argv[])
 	}
 
 	cout << "Low is now set to " << low << endl;
-	generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1);
+	generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1, mask);
 	cout << endl;
 
 	int kernelCount = 0;
@@ -1581,44 +1235,36 @@ int main(int argc, char* argv[])
 	//From here we need to loop to keep the GPU busy. 
 
 	cudaStream_t stream0;
-	//cudaStream_t stream1;
 	cudaStreamCreate(&stream0);
-	//cudaStreamCreate(&stream1);
+
 
 	while (low < high) {
 
+		begin = clock();
 		kernelCount++;
 		cout << "Executing kernel number " << kernelCount << endl;
 
-		unsigned long long minPrime = KernelP[0];
-		unsigned long long maxPrime = KernelP[arraySize - 1];
-		unsigned long long progress = maxPrime - minPrime;
+		cudaStatus = cudaMemcpyToSymbolAsync(lowGPU, &low, sizeof(unsigned long long),0,cudaMemcpyHostToDevice, stream0);
+		//cudaStatus = cudaMemcpyToSymbol(lowGPU, &low, sizeof(unsigned long long));
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "cudaMemcpy to constant memory failed!");
+			goto Error;
+		}
 
-		cout << "Min Prime = " << minPrime << ". Max Prime = " << maxPrime << ". Progress = " << progress << endl;
+		//KernelP = KernelP1;
+
+		unsigned int minPrime = KernelP[0];
+		unsigned int maxPrime = KernelP[arraySize - 1];
+		unsigned int progress = maxPrime - minPrime;
+
+		cout << "Min Prime = " << minPrime  + low << ". Max Prime = " << maxPrime + low << ". Progress = " << progress << endl;
 		cout << "Array Size = " << arraySize << endl;
 
-		//Set low to the next odd number above maxPrime. The CPU will generate the netx batch of primes while the GPU is working
-		low = maxPrime + 2;
+		//Set low to the next odd number above maxPrime. The CPU will generate the next batch of primes while the GPU is working
+		low = low + maxPrime + 2;
 
 
-		begin = clock();
 		cout << "Try to launch the CUDA kernel" << endl;
-
-		// Copy input vectors from host memory to GPU buffers.
-		//cudaStatus = cudaMemcpyAsync(dev_b, KernelP, arraySize * sizeof(unsigned long long), cudaMemcpyHostToDevice, stream0);
-		//if (cudaStatus != cudaSuccess) {
-		//	fprintf(stderr, "cudaMemcpy input failed!");
-		//}
-
-		//cudaStatus = cudaMemsetAsync(dev_g, 0, arraySize * hashTableSize * hashScaling * sizeof(int), stream0);
-		//if (cudaStatus != cudaSuccess) {
-		//	fprintf(stderr, "cudaMemcpy input failed!");
-		//}
-
-		//cudaStatus = cudaMemsetAsync(dev_j, 0, ((arraySize * hashTableSize) / 32) * sizeof(unsigned int), stream0);
-		//if (cudaStatus != cudaSuccess) {
-		//	fprintf(stderr, "cudaMemcpy input failed!");
-		//}
 
 		cudaEvent_t start, stop;
 		cudaEventCreateWithFlags(&start, cudaEventBlockingSync);
@@ -1627,100 +1273,27 @@ int main(int argc, char* argv[])
 		cudaEventRecord(start, stream0);
 
 
-		cudaMemcpyAsync(dev_b, KernelP, arraySize * sizeof(unsigned long long), cudaMemcpyHostToDevice, stream0);
+		cudaMemcpyAsync(dev_b, KernelP, arraySize * sizeof(unsigned int), cudaMemcpyHostToDevice, stream0);
 		cudaMemsetAsync(dev_g, 0, arraySize * hashTableSize * hashScaling * sizeof(int), stream0);
 		cudaMemsetAsync(dev_j, 0, ((arraySize * hashTableSize) / 32) * sizeof(unsigned int), stream0);
+		addKernel1 <<<blocks, threads, 0, stream0 >>>(dev_b, dev_c, dev_f, dev_g, dev_h, dev_i, dev_j, dev_k, dev_n);
 		//cudaStreamSynchronize(stream0);
-
-
-		addKernel1 <<<blocks, threads, 0, stream0 >>>(dev_a, dev_b, dev_c, dev_f, dev_g, dev_h, dev_i, dev_j, dev_k, dev_n);
-		//addKernel1 << <blocks, threads, 0, stream1 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h, dev_i, dev_j);
-
-		//This uses too much shared memory and kills occupancy. Really we want to use no more than 16 ints per thread (for 64 threads per block)!
-		//addKernel1 << <blocks, threads, ((threads*hashElements*hashDensity) / 32)*sizeof(int), stream0 >> >(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h, dev_i);
-
-		//addKernel1<<<blocks,threads,0,stream1>>>(dev_a, dev_b, dev_c, dev_e, dev_f, dev_g, dev_h);
-
-		//generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1);
-		//high = high - 10000000;
-
-		cudaMemcpyAsync(NOut, dev_a, arraySize * sizeof(int), cudaMemcpyDeviceToHost, stream0);
-
-		cudaEventRecord(stop,stream0);
-
 		//We should try to generate the next array of primes in here!
-		generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1);
+		
 
+		cudaEventRecord(stop, stream0);
+		if (low < high) {
+			generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1, mask);
+		}
+		//cudaEventQuery(stop);
+		//cudaDeviceSynchronize();
 		cudaEventSynchronize(stop);
-		//float milliseconds = 0;
-		//cudaEventElapsedTime(&milliseconds, start, stop);
-		//printf("Time taken: %f ms \n", milliseconds);
+		cudaStreamSynchronize(stream0);
 
-		// Check for any errors launching the kernel
-		//cudaStatus = cudaGetLastError();
-		//if (cudaStatus != cudaSuccess) {
-		//    fprintf(stderr, "addKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
-		//}
-
-
-		// Copy output vector from GPU buffer to host memory.
-		//cudaStatus = cudaMemcpyAsync(NOut, dev_a, arraySize * sizeof(int), cudaMemcpyDeviceToHost, stream0);
-		//if (cudaStatus != cudaSuccess) {
-		//	fprintf(stderr, "cudaMemcpy output failed!");
-		//}
-
-		//We should try to generate the next array of primes in here!
-		//generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1);
-		//high = high - 10000000;
-
-		//cudaStreamSynchronize(stream0);
-		//cudaMemcpyAsync(NOut, dev_a, arraySize * sizeof(int), cudaMemcpyDeviceToHost, stream0);
-		//cudaStreamSynchronize(stream0);
-
-		// cudaDeviceSynchronize waits for the kernel to finish, and returns
-		// any errors encountered during the launch.
-		//cudaStatus = cudaDeviceSynchronize();
-		//if (cudaStatus != cudaSuccess) {
-		//	fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
-		//	cudaGetLastError();
-		//}
-
-
-		//if (cudaStatus != cudaSuccess) {
-		//	fprintf(stderr, "addWithCuda failed!");
-		//	return 1;
-		//}
 		end = clock();
 		time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
 		cout << "Time to execute kernel (outside function) " << time_spent << "s" << endl;
-
-		printf("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
-			NOut[0], NOut[32], NOut[64], NOut[96], NOut[128], NOut[160], NOut[192], NOut[224], NOut[256], NOut[288]);
-
-		int maxCycles = 0;
-		int maxThreadID = 0;
-		int minCycles = INT_MAX;
-		int minThreadID = 0;
-		for (int i = 0; i < arraySize; i++) {
-			if (NOut[i] > maxCycles) {
-				maxCycles = NOut[i];
-				maxThreadID = i;
-			}
-			if (NOut[i] < minCycles) {
-				minCycles = NOut[i];
-				minThreadID = i;
-			}
-		}
-
-		cout << "Max Cycles in this kernel was " << maxCycles << " in Thread " << maxThreadID << endl;
-		cout << "Min Cycles in this kernel was " << minCycles << " in Thread " << minThreadID << endl;
-
-		long long totalCycles = 0;
-		for (int i = 0; i < arraySize; i++) {
-			totalCycles += NOut[i];
-		}
-
-		cout << "Total cycles for this kernel was " << totalCycles << " @ " << totalCycles / (arraySize) << " cycles average" << endl << endl;
+		cout << "" << endl;
 
 	}
 
@@ -1754,16 +1327,13 @@ int main(int argc, char* argv[])
 	cout << "Blocksize = " << blocks << ". Threads per block = " << threads << "." << endl;
 
 Error:
-	cudaFree(dev_a);
 	cudaFree(dev_b);
 	cudaFree(dev_c);
-	//cudaFree(dev_e);
 	cudaFree(dev_f);
 	cudaFree(dev_g);
 	cudaFree(dev_h);
 	cudaFree(dev_i);
 	cudaFree(dev_j);
-	//return cudaStatus;
 
 	// cudaDeviceReset must be called before exiting in order for profiling and
 	// tracing tools such as Nsight and Visual Profiler to show complete traces.
@@ -1776,43 +1346,83 @@ Error:
 	return 0;
 }
 
-void generateGPUPrimes(unsigned long long *KernelP, unsigned long long low, unsigned int *smallP, int testArraySize, int primeCount, int arraySize, unsigned int *mark1) {
+void generateGPUPrimes(unsigned int *KernelP1, unsigned long long low, unsigned int *smallP, int testArraySize, int primeCount, int arraySize, unsigned long long *mark1, unsigned long long *mask) {
 	clock_t begin = clock();
-	//unsigned int *mark1 = (unsigned int *)malloc(((testArraySize / 32) + 1)*sizeof(unsigned int));
-	//memset(mark1, 0, ((testArraySize / 32) + 1)*sizeof(unsigned int));
 	unsigned int diff = 0;
 
-	//Lets deal with multiples of 3 separately using a mask.
-	unsigned int mask[3];
-	mask[0] = 0x92492492;
-	mask[1] = 0x49249249;
-	mask[2] = 0x24924924;
+	//for (int i = 0; i < ((testArraySize / 32) + 1); i++) {
+	//	mark1[i] = 0;
+	//}
 
-	unsigned int offset = low % 3;
+	//Lets deal with 3 and 5 using a mask
+	//unsigned long long mask[15];
+	//mask[0] = 0x96692cd259a4b349;
+	//mask[8] = 0x6692cd259a4b3496;
+	//mask[1] = 0x692cd259a4b34966;
+	//mask[9] = 0x92cd259a4b349669;
+	//mask[2] = 0x2cd259a4b3496692;
+	//mask[10] = 0xcd259a4b3496692c;
+	//mask[3] = 0xd259a4b3496692cd;
+	//mask[11] = 0x259a4b3496692cd2;
+	//mask[4] = 0x59a4b3496692cd25;
+	//mask[12] = 0x9a4b3496692cd259;
+	//mask[5] = 0xa4b3496692cd259a;
+	//mask[13] = 0x4b3496692cd259a4;
+	//mask[6] = 0xb3496692cd259a4b;
+	//mask[14] = 0x3496692cd259a4b3;
+	//mask[7] = 0x496692cd259a4b34;
 
-	for (int i = 0; i < ((testArraySize / 32) + 1); i++) {
-		mark1[i] = mask[(offset + i) % 3];
+	unsigned int offset = low % 1155;
+	offset = (offset * 767) % 1155;
+
+
+	for (int i = 0; i < ((testArraySize / 64) + 1); i++) {
+		mark1[i] = mask[offset];
+		//cout << mark1[i] << endl;
+		offset++;;
+		if (offset > 1154) {
+			offset = offset - 1155;
+		}
 	}
+
+
+	//Lets deal with multiples of 3 separately using a mask.
+	//unsigned int mask[3];
+	//mask[0] = 0x92492492;
+	//mask[1] = 0x49249249;
+	//mask[2] = 0x24924924;
+
+	//unsigned int offset = low % 3;
+
+
+	//for (int i = 0; i < ((testArraySize / 32) + 1); i++) {
+	//	mark1[i] = mask[(offset + i) % 3];
+	//}
 
 	//unsigned int mask1[5];
 	//mask1[0] = 0x84210842;
-	//mask1[1] = 0x42108421;
-	//mask1[2] = 0x21084210;
-	//mask1[3] = 0x10842108;
-	//mask1[4] = 0x08421084;
+	//mask1[1] = 0x10842108;
+	//mask1[2] = 0x42108421;
+	//mask1[3] = 0x08421084;
+	//mask1[4] = 0x21084210;
 
-	//offset = low % 5;
+	//offset = (5 - (low % 5))%5;
 
 	//for (int i = 0; i < ((testArraySize / 32) + 1); i++) {
 	//	mark1[i] = mark1[i] | mask1[(offset + i) % 5];
 	//}
 
-	//1000 0100 0010 0001 0000 1000 0100 0010
+	clock_t end = clock();
+	double time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+	cout << "Time setting the masks " << time_spent << "s" << endl;
+	unsigned int totalTouches = 0;
 
-	//Start at 2 now as we deal with 3 and 5 with masks
-	for (int i = 1; i < primeCount; i++) {
+	begin = clock();
+	//Start at 4 now as we deal with 3,5,7,11 with masks.
+	for (int i = 4; i < primeCount; i++) {
 		unsigned int smallPrime = smallP[i];
 		unsigned int mod = low % smallPrime;
+		unsigned int touch = 0;
 
 		if (mod == 0) {
 			diff = 0;
@@ -1823,38 +1433,52 @@ void generateGPUPrimes(unsigned long long *KernelP, unsigned long long low, unsi
 			}
 			mod = mod >> 1;
 			diff = (smallPrime - mod);
+			//diff = (smallPrime * (2 - (mod & 1)) - mod ) >> 1;
 		}
 
 		for (int k = diff; k < testArraySize; k += smallPrime) {
-			//mark[k] = false;
 			//Take k and divide it by 32 to work out which int we are in. Shift by the remainder
-			int intbool = k / 32; //Find the right int
-			int intshift = k & 31; //Work out the shift
-			if (((mark1[intbool] >> (31 - intshift)) & 1) == 1) {
+			int intbool = k / 64; //Find the right int
+			int intshift = k & 63; //Work out the shift
+			
+			mark1[intbool] = mark1[intbool] | (0x8000000000000000 >> intshift);
+			touch++;
+
+			//if (((mark1[intbool] >> (31 - intshift)) & 1) == 1) {
 				//Do nothing - this bit is already 1
-			}
-			else {
-				mark1[intbool] += (0x80000000 >> intshift);
-			}
+			//}
+			//else {
+			//	mark1[intbool] += (0x80000000 >> intshift);
+			//}
 		}
+		//if (smallPrime < 30) {
+		//	cout << smallPrime << ": " << touch << endl;
+		//}
+		totalTouches += touch;
+		touch = 0;
 
 	}
 
-	clock_t end = clock();
-	double time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+	cout << totalTouches << endl;
+
+	end = clock();
+	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
 	cout << "Time marking the prime array " << time_spent << "s" << endl;
 
 	begin = clock();
-	//Use mark1 to decide if we need to add a prime. We're looking for 1 entries in these ints
+	//Use mark1 to decide if we need to add a prime. We're looking for 0 entries in these ints
 	int countPrimes = 0;
 	for (int i = 0; i < testArraySize; i++) {
-		int intbool = i / 32; //Find the right int
-		int intshift = i & 31; //Work out the shift
-		if (((mark1[intbool] >> (31 - intshift)) & 1) == 0) {
-			KernelP[countPrimes] = 2 * i + low;
+		int intbool = i / 64; //Find the right int
+		int intshift = i & 63; //Work out the shift
+		if (((mark1[intbool] >> (63 - intshift)) & 1) == 0) {
+			KernelP1[countPrimes] = 2 * i;
+			if ((2 * i + low) % 5 == 0) {
+				cout << "Prime added: " << 2 * i + low << endl;
+			}
 			countPrimes++;
 			if (countPrimes == arraySize) {
-				cout << "We got as far as " << i + low << " out of " << low + (testArraySize) << endl;
+				cout << "We got as far as " << 2*i + low << " out of " << low + (testArraySize*2) << endl;
 				break;
 			}
 		}
@@ -1865,7 +1489,3 @@ void generateGPUPrimes(unsigned long long *KernelP, unsigned long long low, unsi
 	cout << "Time generating kernel primes " << time_spent << "s" << endl;
 
 }
-
-
-
-
