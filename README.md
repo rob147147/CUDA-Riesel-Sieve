@@ -1,12 +1,11 @@
 This is a sieve for eliminating non-primes of the form k*b^n-1, typically searched by the Conjectures 'R Us (CRUS) project over at mersenneforum.org.
 
+<b>There is an executable available for download for Win64, use the -h option to see the valid command line flags.</b>
+
 The CPU is responsible for reading in ABCD files and generating arrays of prime numbers to send to the GPU.<br />
 The GPU takes an array of prime numbers which may be prime factors of numbers of the form k*b^n-1. The GPU is also given a list of k-values and the n-min and n-max value from the ABCD file. 
 
 The core algorithm run on the GPU is the Baby Steps Giants Steps (BSGS) algorithm for solving the discrete logarithm. 
-<br/>
-
-There is an executable available for download for Win64, use the -h option to see the valid command line flags.
 
 <br />
 This is very much a work in progress but these are some current performance numbers from CUDA enabled NVidia GPUs to which I have access.<br />
