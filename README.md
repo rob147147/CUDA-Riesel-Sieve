@@ -18,6 +18,7 @@ Nvidia GeForce GTX 1060 (3855 GFLOPS, 6GB RAM, 1536kb L2 cache, 120 Watts) - ~23
 Nvidia MX150 (1177 GFLOPS, 2GB RAM, 512kb L2 cache, 25 Watts) - 6,500,000 p/sec (with params -b 5 -m 5)<br />
 Nvidia GeForce RTX 2070 Max-Q (5460 GFLOPS, 8GB RAM, 4096kb L2 Cache, 80 Watts) - 54,800,000 p/sec (with params -b 9 -m 4)<br />
 Nvidia GeForce RTX 2080 (8920 GFLOPS, 8GB RAM, 4096kb L2 Cache, 215W) - 80,000,000 p/sec (with params -b 7 -m 4 -s 256 -Q 18) <br />
+Nvidia GeForce RTX 2080 Ti (11750 GFLOPS, 11GB RAM, 5632kb L2 Cache, 250W) - 123,000,000 p/sec (with params -b 8 -m 4 -s 256 -Q 18) <br />
 <br /> <br />
 
 
