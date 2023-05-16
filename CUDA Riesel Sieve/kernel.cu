@@ -1,26 +1,39 @@
-//TODO - Validate factors - first against input file, then to see if factor is correct.
+//TODO:
+//Device selector in case of multiple CUDA enabled GPUs
+//Check arguments are sensible/valid
+//Check sierpinksi abcd files for correctness and send the right info for this to the gpu to avoid the manual switch
+//Error checking, particularly around the reading of an ABCD file
+//Make Error a function instead of using goto
+//Release memory on completion
+//Check to see if we have a memory leak somewhere as implied on NCC
+//Check arguments won't request too much memory - catching potential CUDA memory allocation errors before they happen.
+//Make the output based on a timer with an input argument for it
 
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
 #include <stdio.h>
 #include <time.h>
+#include <chrono>
 #include <getopt.h>
 #include <iostream>
 #include <fstream>
 #include <string>
 #include <vector>
 #include <list>
-
-#include "FileInput.h"
+#include <omp.h>
+//#include <FileInput.h>
+//#include "FileInput.h"
 
 using namespace std;
 
-void generateGPUPrimes(unsigned int *KernelP1, unsigned long long low, unsigned int *smallP, int testArraySize, int primeCount, int arraySize, unsigned long long *mark1, unsigned long long *mask);
+void generateGPUPrimes(unsigned int *KernelP1, unsigned long long low, unsigned int *smallP, int testArraySize, int primeCount, int arraySize, unsigned long long *mark1, unsigned long long *mask, unsigned long long *mask1, unsigned long long *mask2, unsigned long long *mask3);
+void writeFactorToFile(unsigned long long p, unsigned int k, unsigned int b, unsigned int n, char *factorFile);
 
 #define PRINT true
 #undef PRINT
 
+int *dev_a = 0; //NOut
 unsigned int *dev_b = 0; //KernelP
 int *dev_c = 0; //kns
 __constant__ int base[1]; //Base
@@ -94,6 +107,32 @@ __device__  __forceinline__ void xbinGCDnew(unsigned long long beta, unsigned lo
 			v += alpha; //v>>1 happens in both cases, this just also sets the highest bit to 1
 		}
 	}
+}
+
+void countKs(char* abcdFile, int& count1, int& count3) {
+	string line;
+
+	ifstream myfile(abcdFile);
+	if (myfile.is_open())
+	{
+		while (getline(myfile, line))
+		{
+			count3++;
+
+			string::size_type n = line.find(" ");
+			string token = line.substr(0, n);
+			//cout << token << endl;
+
+			//If tokens[0] == "ABCD" then this defines a new k, otherwise it is a number
+			if (token.compare("ABCD") == 0) {
+				count1++;
+				//cout << "We're here!" << endl;
+			}
+		}
+		myfile.close();
+	}
+
+	else cout << "Unable to open file first time" << endl;
 }
 
 int core(unsigned int k) {
@@ -177,6 +216,13 @@ __device__ __forceinline__ unsigned long long montmul(unsigned long long abar, u
 	unsigned int u3 = 0;
 
 
+	//Maybe just calculate u0 and u1 to start with as we need them. Then deal with u2 and u3 entirely afterwards. Might be more efficient overall
+	//modul64 limits us to primes less than 2^63, so we might as well use that fact. This limits abar, bbar and m to 2^63 too.
+	//t = abar*bbar is now limited to 2^126
+	//t*mprime&mask can still be (2^64)-1
+	//tm*m is now limited to less than 2^127 (about 2^126.5 roughly)
+	//The sum u is now less than 2^128-1 in all cases, so no overflow to worry about
+	
 	//We need to calculate all 128 bits of t = abar * bbar. Add straight to u
 	//PTX Version 1
 	asm("{.reg .u32 treg1;\n\t"              // temp reg t1
@@ -198,24 +244,31 @@ __device__ __forceinline__ unsigned long long montmul(unsigned long long abar, u
 		"mad.hi.u32 treg2, %0, %10, treg2;\n\t" //tm1
 
 	//Multiple tm*m to get the 128 bit product, and add it to u
-		"mad.lo.cc.u32 %0, treg1, %8, %0;\n\t" //Add the lo part of tm.lo*m*lo to u0. Set the carry out
-		"madc.hi.cc.u32 %1, treg1, %8, %1;\n\t" //Add the hi part of tm.lo*m*lo to u1. Set the carry out, and use the carry in
+	//If we move these first four lines to the end of the block we can save the two overflow additions putting flags into u0
+		//"mad.lo.cc.u32 %0, treg1, %8, %0;\n\t" //Add the lo part of tm.lo*m*lo to u0. Set the carry out
+		"add.u32 %1, %1, 1;\n\t" //Don't bother with t0, it will always be 0 and generate a carry
+		"mad.hi.cc.u32 %1, treg1, %8, %1;\n\t" //Add the hi part of tm.lo*m*lo to u1. Set the carry out, and use the carry in
 		"madc.lo.cc.u32 %2, treg2, %9, %2;\n\t" //Add the lo part of tm.hi*m*hi to u2. Set the carry out, and use the carry in
 		"madc.hi.cc.u32 %3, treg2, %9, %3;\n\t" //Add the hi part of tm.hi*m*hi to u3. Use the carry in, and set carry out for overflow detection
-		"addc.u32 %0, 0, 0;\n\t" //Put the overflow flag into u0
+		//"addc.u32 %0, 0, 0;\n\t" //Put the overflow flag into u0
 		"mad.lo.cc.u32 %1, treg1, %9, %1;\n\t" //Add the lo part of tm.lo*m*hi to u1. Set the carry out
 		"madc.hi.cc.u32 %2, treg1, %9, %2;\n\t" //Add the hi part of tm.lo*m*hi to u2. Set the carry out, and use the carry in
-		"addc.cc.u32 %3, %3, 0;\n\t" //Add the potential carry into u3
-		"addc.u32 %0, %0, 0;\n\t" //Put the overflow flag into u0
+		"addc.u32 %3, %3, 0;\n\t" //Add the potential carry into u3
+		//"addc.u32 %0, %0, 0;\n\t" //Put the overflow flag into u0
 		"mad.lo.cc.u32 %1, treg2, %8, %1;\n\t" //Add the lo part of tm.hi*m*lo to u1. Set the carry out
 		"madc.hi.cc.u32 %2, treg2, %8, %2;\n\t" //Add the hi part of tm.hi*m*lo to u2. Set the carry out, and use the carry in
-		"addc.cc.u32 %3, %3, 0\n\t;" //Add the potential carry into u3
-		"addc.u32 %0, %0, 0;}" //Put the overflow flag into u0
+		"addc.u32 %3, %3, 0\n\t;}" //Add the potential carry into u3
+		//"addc.u32 %0, %0, 0;}" //Put the overflow flag into u0
 
 		: "+r"(u0), "+r"(u1), "+r"(u2), "+r"(u3) : "r"(alo), "r"(ahi), "r"(blo), "r"(bhi), "r"(mlo), "r"(mhi), "r"(mprimelo), "r"(mprimehi)
 	);
 
 	//Look at this, we don't need to save tm0 and tm1 as they are not used after the asm. 
+	//if (mlo == ((unsigned int)102297149781479)) {
+	//	printf("Inputs = %llu, %llu, %u, %u, %u, %u\n", abar,bbar,mlo,mhi,mprimelo,mprimehi);
+	//	printf("u = %u %u %u %u\n", u3, u2, u1, u0);
+	//}
+
 
 	//We're only interested in u2 and u3
 	unsigned long long u = u3;
@@ -226,15 +279,21 @@ __device__ __forceinline__ unsigned long long montmul(unsigned long long abar, u
 	m = m << 32;
 	m = m | mlo;
 
-	if (u0 > 0 || u >= m) {
+	//Confirmed that this piece of code is useful and cases do fall into here
+	if (u >= m) {
 		u = u - m;
 	}
+	
+	//if (mlo == ((unsigned int)102297149781479)) {
+	//	printf("Output = %llu\n", u);
+	//}
+
 	return u;
 
 }
 
 
-__global__ void addKernel1(unsigned int *KernelP, int *knmatrix, int *rowOffset, int *hashKeys, int *hashElements, int *hashDensity, unsigned int *bits, int *Q, int *minSubs)
+__global__ void addKernel1(int *NOut, unsigned int *KernelP, int *knmatrix, int *rowOffset, int *hashKeys, int *hashElements, int *hashDensity, unsigned int *bits, int *Q, int *minSubs)
 {
 	#ifdef PRINT
 	clock_t beginfull = clock();
@@ -256,6 +315,7 @@ __global__ void addKernel1(unsigned int *KernelP, int *knmatrix, int *rowOffset,
 	int shift = 31 - __clz(m);
 
 	const int S = (blockIdx.x * blockDim.x) + threadIdx.x; //This is this block ID*threads in a block + threadID
+ const int SFull = gridDim.x * blockDim.x;
 	const int Sm = S * mem;
 	const int Sints = Sm >> 5;
 
@@ -362,7 +422,7 @@ __global__ void addKernel1(unsigned int *KernelP, int *knmatrix, int *rowOffset,
 			}
 
 			hashKeys[(Sm + firstFree)] = ((store & 0xFFFF0000) + ((key & 0x0000FFFF) | 0x00008000)); //Store this new data, with the pointer from the head. We're now 2nd in this linked list
-			store = (key & 0xFFFF0000) + firstFree + m;
+			store = (key & 0xFFFF0000) + firstFree;
 			firstFree++;
 
 		}
@@ -407,123 +467,200 @@ __global__ void addKernel1(unsigned int *KernelP, int *knmatrix, int *rowOffset,
 	#ifdef PRINT
 	int giant = 0;
 	int maxProbe = 0;
+	int keyHit = 0;
 	#endif
 
 	unsigned long long fixedBeta = 0;
 	unsigned long long beta = oneMS;
+	int prevRem = 0;
 
 	for (int t = 0; t < tMin[0]; t++) {
 		beta = montmul(beta, c1, mlo, mhi, mprimelo, mprimehi);
 	}
 
+	const int subseqCount = *minSubs;
+	const int offset = *rowOffset;
 	int leg1;
 	int leg2fixed = legendre(base[0], b);
 	int leg2;
 	int leg = 1;
+	int leg12;
 
 	int probe = 0;
 	int thisk = 0;
 	int corek = 0;
 	int lastk = 0;
 	int remainder = 0;
+	int hash_time_spent = 0;
+	int loop_time_spent = 0;
+	int wloop_time_spent = 0;
+	int init_time_spent = 0;
+
+	#ifdef PRINT
+	end = clock();
+	time_spent = (end - begin);
+	if (printer) {
+		printf("Cycles setting up the second half was %d\n", time_spent);
+	}
+	#endif
 
 	//Work through the matrix of kn values
-	for (int k = 0; k < *minSubs; k++) {
-		while (k < *minSubs) {
-			lastk = thisk;
-			thisk = knmatrix[k* *rowOffset];
-			if (thisk != lastk) {
-				leg1 = legendre(thisk, b);
-				leg2 = !(leg1^leg2fixed); //Rather than use k*base, use the multiplicative property of legendre to save any overflows
-				#ifdef PRINT
-				leg = leg + 1;
-				endLeg = clock();
-				time_spent = (endLeg - beginLeg);
-				legtime += time_spent;
-				#endif		
-				fixedBeta = modul64(thisk, 0, b);
-				//The single line of code below lets us sieve +1 instead of -1
-				//fixedBeta = b - fixedBeta;
-				fixedBeta = montmul(fixedBeta, beta, mlo, mhi, mprimelo, mprimehi);
-			}
-
-			if (leg1 || leg2) {
-				remainder = knmatrix[(k* *rowOffset) + 1];
-				if ((remainder % 2 == 0 && leg1) || (remainder % 2 == 1 && leg2)) {
-					break;
-				}
-			}
-			k++;
+	for (int k = 0; k < subseqCount; k++) {
+		#ifdef PRINT
+		int beginInitLoop = clock();
+		#endif	
+		lastk = thisk;
+		thisk = knmatrix[k * offset];
+		remainder = knmatrix[(k * offset) + 1];
+		if (thisk != lastk) {
+			#ifdef PRINT
+			beginLeg = clock();
+			#endif	
+			leg1 = legendre(thisk, b);
+			leg2 = !(leg1^leg2fixed); //Rather than use k*base, use the multiplicative property of legendre to save any overflows
+			leg12 = leg1 || leg2;
+			#ifdef PRINT
+			leg = leg + 1;
+			endLeg = clock();
+			time_spent = (endLeg - beginLeg);
+			legtime += time_spent;
+			#endif		
+			fixedBeta = modul64(thisk, 0, b);
+			//The single line of code below lets us sieve +1 instead of -1
+			//fixedBeta = b - fixedBeta;
+			fixedBeta = montmul(fixedBeta, beta, mlo, mhi, mprimelo, mprimehi); 
+			prevRem = 0;
 		}
 
-			//We need to do something
-			unsigned long long sB = fixedBeta;
-			for (int rem = 0; rem < remainder; rem++) {
-				sB = montmul(sB, KernelBase, mlo, mhi, mprimelo, mprimehi);
-			}
+		#ifdef PRINT
+		int endInitLoop = clock();
+		init_time_spent += (endInitLoop - beginInitLoop);
+		#endif	
 
-			for (int t = tMin[0]; t < tMax[0]; t++) {
-				sB = montmul(sB, c1, mlo, mhi, mprimelo, mprimehi);
+		if (leg12) {
+			#ifdef PRINT
+			int beginHash = clock();
+			#endif	
+			//remainder = knmatrix[(k * offset) + 1];
+			if ((remainder % 2 == 0 && leg1) || (remainder % 2 == 1 && leg2)) {
+
+				//We need to do something
+				//unsigned long long sB = fixedBeta;
+				for (int rem = prevRem; rem < remainder; rem++) {
+					fixedBeta = montmul(fixedBeta, KernelBase, mlo, mhi, mprimelo, mprimehi);
+				}
+				prevRem = remainder;
+				unsigned long long sB = fixedBeta;
 				#ifdef PRINT
-				giant++;
-				#endif
+				int beginLoop = clock();
+				#endif	
+				//int off = 2;
+				for (int t = tMin[0]; t < tMax[0]; t++) {
+					sB = montmul(sB, c1, mlo, mhi, mprimelo, mprimehi);
+					//This is wrong. The bits that we look at need to be based on t, as this is impacted by choice of m.
+					//int candidates = knmatrix[(k* *rowOffset) + off];
+					//off++;
+					//if (candidates == 0) {
+					//	continue;
+					//}
+					#ifdef PRINT
+					giant++;
+					probe = 0;
+					#endif
+					//int sBint = (int)sB; <- Look to see if storing this is useful. 
 
-				//Check if beta is in js
-				probe = 0;
-				pointer = (int)sB & (m - 1);
-
-				while (true) {
-
-					//This was quicker with the bit array in the past - it now appears to be faster without using the bit array
-					key = hashKeys[(Sm + pointer)];
-					lookups++;
-					probe++;
+					//Check if beta is in js
+					bool first = true;
+					int sbInt = (int)sB;
+					int sbHigh = sbInt & 0xFFFF0000;
+					pointer = sbInt & (m - 1);
 
 					#ifdef PRINT
-					if (probe > maxProbe) {
-						maxProbe = probe;
-					}
-					#endif
-					
-					pointer = (key & 0x0000FFFF); //Remove the data, leave the pointer
-					key = key & 0xFFFF0000; //Remove the pointer, leave the data
+					int beginWLoop = clock();
+					#endif	
 
-					if (((int)sB & 0xFFFF0000) == key) {
+					while (true) {
 
-						js = oneMS;
+						//This was quicker with the bit array in the past - it now appears to be faster without using the bit array
+						key = hashKeys[(Sm + pointer)];
+						lookups++;
 
-						for (int jval = 0; jval < m; jval++) {
-							if (js == sB) {
-								output = (t+1) * m - jval;
-								//printf("t = %d, m = %d, jval = %d, output = %llu\n", t, m, jval, output);
-								pointer = 0x0000FFFF;
-								break;
+						#ifdef PRINT
+						probe++;
+						if (probe > maxProbe) {
+							maxProbe = probe;
+						}
+						#endif
+
+						pointer = (key & 0x0000FFFF); //Remove the data, leave the pointer
+						key = key & 0xFFFF0000; //Remove the pointer, leave the data
+
+						if (sbHigh == key) {
+							//We rarely end up in here, no real optimisation to be gained.
+							#ifdef PRINT
+							keyHit++;
+							#endif
+							js = oneMS;
+
+							for (int jval = 0; jval < m; jval++) {
+								if (js == sB) {
+									output = (t + 1) * m - jval;
+									//printf("t = %d, m = %d, jval = %d, output = %llu\n", t, m, jval, output);
+									pointer = 0x0000FFFF;
+									break;
+								}
+
+								js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
+
 							}
-
-							js = montmul(js, newKB, mlo, mhi, mprimelo, mprimehi);
+							//printf("Match in S %d. t=%d, hash=%d, probe=%d beta=%llu rem=%d. Output will be %llu | %d*%d^%d-1\n", S, t, hash, probe, beta, remainder, b, thisk, *Base, ((output*Q) + remainder));
 
 						}
-						//printf("Match in S %d. t=%d, hash=%d, probe=%d beta=%llu rem=%d. Output will be %llu | %d*%d^%d-1\n", S, t, hash, probe, beta, remainder, b, thisk, *Base, ((output*Q) + remainder));
+
+						if (((pointer >= 32767) && first) || (pointer == 0x0000FFFF)) {
+							break;
+						}
+
+						pointer = (pointer & 0x00007FFF);
+						first = false;
 
 					}
 
-					if (((pointer >= 32767) && (probe == 1)) || (pointer == 0x0000FFFF)) {
-						break;
-					}
+					#ifdef PRINT
+					int endWLoop = clock();
+					wloop_time_spent += (endWLoop - beginWLoop);
+					#endif
 
-					pointer = (pointer & 0x00007FFF) - m;
 
 				}
 
+				#ifdef PRINT
+				int endLoop = clock();
+				loop_time_spent += (endLoop - beginLoop);
+				#endif
 
+				if (output > 0) {
+					//printf("Output will be %llu | %d*%d^%d-1. Thread %d\n", b, thisk, base[0], ((output* *Q) + remainder), S);
+					//printf("%llu | %d*%d^%d-1\n", b, thisk, base[0], ((output* *Q) + remainder));
+     NOut[S] = thisk;
+     NOut[SFull + S] = (output* *Q) + remainder;
+					output = -1;
+				}
 			}
-			if (output > 0) {
-				printf("Output will be %llu | %d*%d^%d-1. Thread %d\n", b, thisk, base[0], ((output* *Q) + remainder), S);
-				output = -1;
-			}
-		//}
-
+			#ifdef PRINT
+			int endHash = clock();
+			hash_time_spent += (endHash - beginHash);
+			#endif	
+		}
 	}
+
+	#ifdef PRINT
+	int now = clock();
+	time_spent = (now-end);
+	if (printer) {
+		printf("Cycles completing the big for loop was %d\n", time_spent);
+	}
+	#endif	
 
 	#ifdef PRINT
 	if (printer) {
@@ -531,6 +668,7 @@ __global__ void addKernel1(unsigned int *KernelP, int *knmatrix, int *rowOffset,
 		//		printf("Number of collisions: %d\n", collisions);
 		printf("Number of lookups against hash table was %d\n", lookups);
 		printf("Max probe length was %d\n", maxProbe);
+		printf("Number of hash key hits %d\n", keyHit);
 		//		printf("Average probe length was %f\n", avgProbe / giant);
 		//printf("Number of hits was %d\n", hits);
 	}
@@ -538,6 +676,10 @@ __global__ void addKernel1(unsigned int *KernelP, int *knmatrix, int *rowOffset,
 	end = clock();
 	time_spent = (end - begin);
 	if (printer) {
+		printf("Cycles to complete init k section was %d\n", init_time_spent);
+		printf("Cycles to complete hash lookups was %d\n", hash_time_spent);
+		printf("Cycles to complete for loop was %d\n", loop_time_spent);
+		printf("Cycles to complete while loop was %d\n", wloop_time_spent);
 		printf("Cycles to complete BSGS step was %d\n", time_spent);
 		//		printf("Average (BSGS Cycles/muls) was %d\n", (time_spent / countmuls));
 		printf("Average (BSGS Cycles/lookups) was %d\n", (time_spent / lookups));
@@ -577,6 +719,7 @@ int main(int argc, char* argv[])
 	int threadScale = 1;
 	int blockScale = 1;
 	char *abcdFile = "sr_745.abcd";
+ char *FactorFile = "factors.txt";
 
 	unsigned long long low = 0;
 	unsigned long long high = 0;
@@ -586,7 +729,7 @@ int main(int argc, char* argv[])
 	int smallPrimeScale = 256;
 
 
-	while ((inp = getopt(argc, argv, "b:hi:m:p:P:Q:s:t:v:")) != -1) {
+	while ((inp = getopt(argc, argv, "b:hi:m:p:P:Q:O:s:t:v:")) != -1) {
 		switch (inp) {
 		case 'b':
 			//Get the blockScale argument
@@ -596,19 +739,22 @@ int main(int argc, char* argv[])
 		case 'h':
 			//Print the help 
 			cout << endl;
-			cout << "CUDA Riesel Sieve 0.1.0 -- A sieve for multiple sequences of the form k*b^n-1" << endl;
+			cout << "CUDA Riesel Sieve 0.2.0 -- A sieve for multiple sequences of the form k*b^n-1" << endl;
 			cout << endl;
 			cout << "-i FILE  : Read in abcd sieve file called FILE." << endl;
 			cout << "-m m     : Use m elements for the hash table." << endl;
 			cout << "-p P0    : Start sieveing from P0. Must have a corresponding P1." << endl;
 			cout << "-P P1    : Finish sieving at P1. Must have a corresponding P0. If no argument will use a scaled default for testing." << endl;
-			cout << "             If no -p and -P arguments then we will default to 102297149770000 for testing." << endl;
+			cout << "                If no -p and -P arguments then we will default to 102297149770000 for testing." << endl;
 			cout << "-Q Q     : Override subsequence value Q. Sieve k*b^n-1 as (k*b^d)*(b^Q)^m-1." << endl;
+   cout << "-O FILE  : Write factors to a file called FILE" << endl;
 			cout << "-b SCALE : Scale the number of CUDA blocks per kernel by the integer argument SCALE." << endl;
 			cout << "-t SCALE : Scale the number of CUDA threads per block by the integer argument SCALE." << endl;
-			cout << "             Note that these no longer require being powers of 2. We use the formula 1<<SCALE to ensure power of 2." << endl;
-			cout << "-v 	  : Don't verify factors." << endl; 
-			cout << "-s SCALE : Scale the small primes by the integer argument SCALE. Default is 256." << endl;
+			cout << "                Note that these no longer require being powers of 2. We use the formula 1<<SCALE to ensure power of 2." << endl;
+   cout << "-s SCALE : Scale the small primes by the integer argument SCALE. Default is 256." << endl;
+			cout << "-v 	     : Don't verify factors. This implies running datless." << endl;
+			cout << "                Switching off verification will lead to factors being found for candidates no longer in the sieve file due to running datless." << endl;
+			cout << "                This will speed up sieving when large numbers of factors are being found, such as when using a small P0 value." << endl;    
 			cout << "-h       : Prints this help" << endl;
 			return 0;
 
@@ -638,6 +784,12 @@ int main(int argc, char* argv[])
 				cout << "Bad input parameter : Q must be an even integer greater than 0." << endl;
 				return 1;
 			}
+			break;
+   
+  case 'O':
+  	//Get the output file argument
+			FactorFile = optarg;
+			//Check this is a valid filename at some point
 			break;
 
 		case 's':
@@ -676,8 +828,19 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
-	cout << "Trying to launch with BlockScale = " << blockScale << " and ThreadScale = " << threadScale << endl;
+	cout << "BlockScale = " << blockScale << endl;
+ cout << "ThreadScale = " << threadScale << endl;
+ cout << "Low = " << low << endl;
+ cout << "High = " << high << endl;
+ cout << "Q_In = " << Qin << endl;
+ cout << "HashTableSize = " << hashTableSize << endl;
+ cout << "Verify = " << verify << endl;
+ cout << "S = " << smallPrimeScale << endl;
+ cout << "ABCD = " << abcdFile << endl;
+ cout << "FactorFile = " << FactorFile << endl;
+ cout << "" << endl;
 
+ 
 	blockScale = 1 << blockScale - 1;
 	threadScale = 1 << threadScale - 1;
 
@@ -713,8 +876,33 @@ int main(int argc, char* argv[])
 	const int blocks = 128 * blockScale;
 	const int threads = 128 * threadScale;
 	const int arraySize = blocks * threads;
-	//This is based on the density of primes ~1/45 at 2^64. As we only consider odd numbers, 24 allows for roughly ~1/48 density, so we have some leeway here 
-	const int testArraySize = arraySize * 24;
+	//This is based on the density of primes ~1/45 at 2^64. As we only consider odd numbers, 24 allows for roughly ~1/48 density, so we have some leeway here. We now scale this with the input value s. The less small primes we are using the smaller the testArray can be, and hence we gain some speed.
+	int testArraySizeScaleFactor = 24;
+	if (smallPrimeScale <= 4) {
+		testArraySizeScaleFactor = 12; //Checked and seems to work for various b values
+	}
+ else 	if (smallPrimeScale <= 8) {
+		testArraySizeScaleFactor = 13; //Test this more
+	}
+ else 	if (smallPrimeScale <= 16) {
+		testArraySizeScaleFactor = 14; //Test this more
+	}
+ else 	if (smallPrimeScale <= 32) {
+		testArraySizeScaleFactor = 16; //Not checked
+	}
+ else 	if (smallPrimeScale <= 64) {
+		testArraySizeScaleFactor = 18; //Not checked
+	}
+ else 	if (smallPrimeScale <= 128) {
+		testArraySizeScaleFactor = 20; //Not checked
+	}
+ else 	if (smallPrimeScale <= 256) {
+		testArraySizeScaleFactor = 22; //Not checked
+	}
+ else {
+  testArraySizeScaleFactor = 24; //Base case, should be fine up to 2^64 for any value of s
+ } 
+	const int testArraySize = arraySize * testArraySizeScaleFactor;
 	const int hashScaling = 1;
 
 
@@ -835,7 +1023,7 @@ int main(int argc, char* argv[])
 					string b = token.substr(0, n);
 					//cout << b << endl;
 					baseCPU = stoi(b);
-					cout << "The base is " << base << endl;
+					cout << "The base is " << baseCPU << endl;
 				}
 				//Get the starting n-value - remove the square brakets
 				n = token.find("[");
@@ -1000,14 +1188,59 @@ int main(int argc, char* argv[])
 		}
 	}
 
+	//for (int ddd = 0; ddd < (minSubs * rowoffset); ddd++) {
+	//	if ((((ddd % rowoffset) == 0) || ((ddd % rowoffset) == 1)) && ddd<1200) {
+	//		cout << (matrix[ddd]) << endl;
+	//	}
+	//}
+
+	//cout << "-------------------------------------------------------------------------------------" << endl;
+
+	//Can we sort the matrix before we send it to the GPU?
+	int *matrix1 = (int *)calloc(minSubs * rowoffset, sizeof(int));
+	for (int aaa = 0; aaa < minSubs; aaa++) {
+		int kSearchmin = INT_MAX;
+		int rSearchmin = INT_MAX;
+		int kindex = 0;
+		//Look through the matrix and find the smallest k and rem.
+		for (int bbb = 0; bbb < minSubs; bbb++) {
+			if ((matrix[bbb*rowoffset] <= kSearchmin) && (matrix[bbb*rowoffset] != INT_MAX)) {
+				if (matrix[(bbb*rowoffset) + 1] < rSearchmin) {
+					//This is the smallest k and r that we've found so far. Store the location
+					kSearchmin = matrix[bbb*rowoffset];
+					rSearchmin = matrix[(bbb*rowoffset) + 1];
+					kindex = bbb;
+				}
+			}
+		}
+		//Copy the row now, and edit the k and r so we don't use them again
+		for (int ccc = 0; ccc < rowoffset; ccc++) {
+			matrix1[(aaa * rowoffset) + ccc] = matrix[(kindex * rowoffset) + ccc];
+		}
+		matrix[(kindex * rowoffset)] = INT_MAX;
+
+		//for (int ddd = 0; ddd < (minSubs * rowoffset); ddd++) {
+		//	if ((((ddd % rowoffset) == 0) || ((ddd % rowoffset) == 1)) && ddd<1200 && aaa<5) {
+		//		cout << (matrix[ddd]) << endl;
+		//	}
+		//}
+	}
+
+	for (int ddd = 0; ddd < (minSubs * rowoffset); ddd++) {
+		matrix[ddd] = matrix1[ddd];
+		//if ((((ddd % rowoffset) == 0) || ((ddd % rowoffset) == 1)) && ddd<1200) {
+		//	cout << (matrix[ddd]) << endl;
+		//}
+	}
+	//matrix = matrix1;
 
 	//Generate Primes -------------------------------------------------------------------------------------------
 
 	//unsigned long long *KernelP = (unsigned long long *)malloc(arraySize * sizeof(unsigned long long));
-	int *NOut;
+	//int *NOut;
 	unsigned int *KernelP;
-	//int *NOut = (int *)malloc(arraySize * sizeof(int));
-	cudaMallocHost((void **)&NOut, arraySize * sizeof(int));
+	int *NOut = (int *)malloc(2 * arraySize * sizeof(int));
+	cudaMallocHost((void **)&NOut, 2 * arraySize * sizeof(int));
 	cudaMallocHost((void **)&KernelP, arraySize * sizeof(unsigned int));
 
 	//Low should be greater than the primes we use below.
@@ -1053,10 +1286,25 @@ int main(int argc, char* argv[])
 	unsigned long long *mark1 = (unsigned long long *)malloc(((testArraySize / 64) + 1) * sizeof(unsigned long long));
 	//testArraySize is 393216*blockScale*threadScale. This is divided by 64 as numbers are represented as bits, so 6144 longs. 
 	//3*5*7*11 = 1155, so use that as the mask, as it will always fit, though we could in theory use a larger mask, it doesn't need to cycle around.
-	unsigned long long *mask = (unsigned long long *)malloc(sizeof(unsigned long long) * 3 * 5 * 7 * 11 * 13);
-	memset(mask, 0, 3*5*7*11*13 * sizeof(unsigned long long));
+	
+	//We are now looking at using 4 masks of roughly equal size. This will help performance while also keeping memory usage lower than using masks consisting of sequential primes
+	//We need to update these with the correct primes, up to and including 61.
+	//The groups are: 3,5,19,37,47    11,17,43,61    13,23,31,53    7,29,41,59
+	
+	unsigned long long *mask = (unsigned long long *)malloc(sizeof(unsigned long long) * 3 * 5 * 19 * 37 * 47);
+	memset(mask, 0, 3*5*19*37*47 * sizeof(unsigned long long));
+	
+	unsigned long long *mask1 = (unsigned long long *)malloc(sizeof(unsigned long long) * 11 * 17 * 43 * 61);
+	memset(mask1, 0, 11*17*43*61 * sizeof(unsigned long long));
+	
+	unsigned long long *mask2 = (unsigned long long *)malloc(sizeof(unsigned long long) * 13 * 23 * 31 * 53);
+	memset(mask2, 0, 13*23*31*53 * sizeof(unsigned long long));
+	
+	unsigned long long *mask3 = (unsigned long long *)malloc(sizeof(unsigned long long) * 7 * 29 * 41 * 59);
+	memset(mask3, 0, 7*29*41*59 * sizeof(unsigned long long));
+	
 	//Assume the first element =0 mod 1155
-	int limit = 3 * 5 * 7 * 11 * 13 * 64;
+	int limit = 3 * 5 * 19 * 37 * 47 * 64;
 	for (int k = 0; k < limit; k += 3) {
 		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
 		int intbool = k / 64; //Find the right int
@@ -1071,27 +1319,125 @@ int main(int argc, char* argv[])
 
 		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
 	}
-	for (int k = 0; k < limit; k += 7) {
+	for (int k = 0; k < limit; k += 19) {
 		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
 		int intbool = k / 64; //Find the right int
 		int intshift = k & 63; //Work out the shift
 
 		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
 	}
+	for (int k = 0; k < limit; k += 37) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
+	}
+	for (int k = 0; k < limit; k += 47) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
+	}
+
+
+	//Mask1
+	limit = 11 * 17 * 43 * 61 * 64;
 	for (int k = 0; k < limit; k += 11) {
 		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
 		int intbool = k / 64; //Find the right int
 		int intshift = k & 63; //Work out the shift
 
-		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
+		mask1[intbool] = mask1[intbool] | (0x8000000000000000 >> intshift);
 	}
+	for (int k = 0; k < limit; k += 17) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask1[intbool] = mask1[intbool] | (0x8000000000000000 >> intshift);
+	}
+	for (int k = 0; k < limit; k += 43) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask1[intbool] = mask1[intbool] | (0x8000000000000000 >> intshift);
+	}
+	for (int k = 0; k < limit; k += 61) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask1[intbool] = mask1[intbool] | (0x8000000000000000 >> intshift);
+	}
+
+
+	//Mask2
+	limit = 13 * 23 * 31 * 53 * 64;
 	for (int k = 0; k < limit; k += 13) {
 		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
 		int intbool = k / 64; //Find the right int
 		int intshift = k & 63; //Work out the shift
 
-		mask[intbool] = mask[intbool] | (0x8000000000000000 >> intshift);
+		mask2[intbool] = mask2[intbool] | (0x8000000000000000 >> intshift);
 	}
+	for (int k = 0; k < limit; k += 23) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask2[intbool] = mask2[intbool] | (0x8000000000000000 >> intshift);
+	}
+	for (int k = 0; k < limit; k += 31) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask2[intbool] = mask2[intbool] | (0x8000000000000000 >> intshift);
+	}
+	for (int k = 0; k < limit; k += 53) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask2[intbool] = mask2[intbool] | (0x8000000000000000 >> intshift);
+	}
+	
+	
+	//Mask3
+	limit = 7 * 29 * 41 * 59 * 64;
+	for (int k = 0; k < limit; k += 7) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask3[intbool] = mask3[intbool] | (0x8000000000000000 >> intshift);
+	}
+	for (int k = 0; k < limit; k += 29) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask3[intbool] = mask3[intbool] | (0x8000000000000000 >> intshift);
+	}
+	for (int k = 0; k < limit; k += 41) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask3[intbool] = mask3[intbool] | (0x8000000000000000 >> intshift);
+	}
+	for (int k = 0; k < limit; k += 59) {
+		//Take k and divide it by 64 to work out which int we are in. Shift by the remainder
+		int intbool = k / 64; //Find the right int
+		int intshift = k & 63; //Work out the shift
+
+		mask3[intbool] = mask3[intbool] | (0x8000000000000000 >> intshift);
+	}
+
+
 	//for (int k = 0; k < 1155; k++) {
 	//	cout << mask[k] << endl;
 	//}
@@ -1103,7 +1449,7 @@ int main(int argc, char* argv[])
 	cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
-		goto Error;
+		//goto Error;
 	}
 	cudaStatus = cudaSetDevice(0);
 	cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
@@ -1111,64 +1457,71 @@ int main(int argc, char* argv[])
 
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
-		goto Error;
+		//goto Error;
 	}
 
 	// Allocate GPU buffers for three vectors (one output, seven input). 
 	//Give all vectors same size for now, we can change this afterwards
+ 
+ cudaStatus = cudaMalloc((void**)&dev_a, 2 * arraySize * sizeof(int));
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaMalloc failed!");
+		//goto Error;
+	}
+
 
 	cudaStatus = cudaMalloc((void**)&dev_b, arraySize * sizeof(unsigned long long));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	cudaStatus = cudaMalloc((void**)&dev_c, minSubs * rowoffset * sizeof(int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	cudaStatus = cudaMalloc((void**)&dev_f, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	cudaStatus = cudaMalloc((void**)&dev_g, arraySize * hashTableSize * hashScaling * sizeof(int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	cudaStatus = cudaMalloc((void**)&dev_h, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	cudaStatus = cudaMalloc((void**)&dev_i, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
+		//goto Error;
 	}
 
-	cudaStatus = cudaMalloc((void**)&dev_j, ((arraySize * hashTableSize) / 32) * sizeof(unsigned int));
+	cudaStatus = cudaMalloc((void**)&dev_j, ((arraySize * hashTableSize * hashScaling) / 32) * sizeof(unsigned int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	cudaStatus = cudaMalloc((void**)&dev_k, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	cudaStatus = cudaMalloc((void**)&dev_n, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	//Copy the data to the correct GPU buffers
@@ -1176,55 +1529,55 @@ int main(int argc, char* argv[])
 	cudaStatus = cudaMemcpy(dev_c, matrix, minSubs * rowoffset * sizeof(int), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
 		cout << (count1 * 3 + minSubs + 3) * sizeof(int) << "bytes" << endl;
-		goto Error;
+		//goto Error;
 	}
 
 	cudaStatus = cudaMemcpyToSymbol(base, &baseCPU, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy to constant memory failed!");
-		goto Error;
+		fprintf(stderr, "cudaMemcpy to constant memory failed for base!");
+		//goto Error;
 	}
 
 	cudaStatus = cudaMemcpy(dev_f, &rowoffset, sizeof(int), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMemcpy failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	cudaStatus = cudaMemcpy(dev_h, &hashTableSize, sizeof(int), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMemcpy failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	cudaStatus = cudaMemcpy(dev_i, &hashScaling, sizeof(int), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMemcpy failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	cudaStatus = cudaMemcpy(dev_k, &minQ, sizeof(int), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMemcpy failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	cudaStatus = cudaMemcpyToSymbol(tMin, &tMinCPU, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy to constant memory failed!");
-		goto Error;
+		fprintf(stderr, "cudaMemcpy to constant memory failed for tMin!");
+		//goto Error;
 	}
 
 	cudaStatus = cudaMemcpyToSymbol(tMax, &tMaxCPU, sizeof(int));
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy to constant memory failed!");
-		goto Error;
+		fprintf(stderr, "cudaMemcpy to constant memory failed for tMax!");
+		//goto Error;
 	}
 
 	cudaStatus = cudaMemcpy(dev_n, &minSubs, sizeof(int), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMemcpy failed!");
-		goto Error;
+		//goto Error;
 	}
 
 	//Create the first set of primes for the GPU before we start
@@ -1235,12 +1588,16 @@ int main(int argc, char* argv[])
 	}
 
 	cout << "Low is now set to " << low << endl;
-	generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1, mask);
+	generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1, mask, mask1, mask2, mask3);
 	cout << endl;
 
 	int kernelCount = 0;
-	clock_t loopTime = clock();
-	//From here we need to loop to keep the GPU busy. 
+ int factorCount = 0;
+	//clock_t loopTime = clock();
+	auto loopTime = std::chrono::high_resolution_clock::now();
+	//From here we need to loop to keep the GPU busy.
+
+	int *KernelPOld = (int *)malloc(arraySize * sizeof(int)); 
 
 	cudaStream_t stream0;
 	cudaStreamCreate(&stream0);
@@ -1248,15 +1605,15 @@ int main(int argc, char* argv[])
 
 	while (low < high) {
 
-		begin = clock();
+		auto begin = std::chrono::high_resolution_clock::now();
 		kernelCount++;
-		cout << "Executing kernel number " << kernelCount << endl;
+		//cout << "Executing kernel number " << kernelCount << endl;
 
-		cudaStatus = cudaMemcpyToSymbolAsync(lowGPU, &low, sizeof(unsigned long long),0,cudaMemcpyHostToDevice, stream0);
+		cudaStatus = cudaMemcpyToSymbolAsync(lowGPU, &low, sizeof(unsigned long long),0,cudaMemcpyHostToDevice,stream0);
 		//cudaStatus = cudaMemcpyToSymbol(lowGPU, &low, sizeof(unsigned long long));
 		if (cudaStatus != cudaSuccess) {
-			fprintf(stderr, "cudaMemcpy to constant memory failed!");
-			goto Error;
+			fprintf(stderr, "cudaMemcpy to constant memory failed for lowGPU!");
+			//goto Error;
 		}
 
 		//KernelP = KernelP1;
@@ -1265,14 +1622,15 @@ int main(int argc, char* argv[])
 		unsigned int maxPrime = KernelP[arraySize - 1];
 		unsigned int progress = maxPrime - minPrime;
 
-		cout << "Min Prime = " << minPrime  + low << ". Max Prime = " << maxPrime + low << ". Progress = " << progress << endl;
-		cout << "Array Size = " << arraySize << endl;
+		//cout << "Min Prime = " << minPrime  + low << ". Max Prime = " << maxPrime + low << ". Progress = " << progress << endl;
+		//cout << "Array Size = " << arraySize << endl;
 
 		//Set low to the next odd number above maxPrime. The CPU will generate the next batch of primes while the GPU is working
+  unsigned long long oldLow = low;
 		low = low + maxPrime + 2;
 
 
-		cout << "Try to launch the CUDA kernel" << endl;
+		//cout << "Try to launch the CUDA kernel" << endl;
 
 		cudaEvent_t start, stop;
 		cudaEventCreateWithFlags(&start, cudaEventBlockingSync);
@@ -1282,40 +1640,155 @@ int main(int argc, char* argv[])
 
 
 		cudaMemcpyAsync(dev_b, KernelP, arraySize * sizeof(unsigned int), cudaMemcpyHostToDevice, stream0);
+  cudaMemsetAsync(dev_a, 0, 2 * arraySize * sizeof(int), stream0);
 		cudaMemsetAsync(dev_g, 0, arraySize * hashTableSize * hashScaling * sizeof(int), stream0);
-		cudaMemsetAsync(dev_j, 0, ((arraySize * hashTableSize) / 32) * sizeof(unsigned int), stream0);
-		addKernel1 <<<blocks, threads, 0, stream0 >>>(dev_b, dev_c, dev_f, dev_g, dev_h, dev_i, dev_j, dev_k, dev_n);
+		cudaMemsetAsync(dev_j, 0, ((arraySize * hashTableSize * hashScaling) / 32) * sizeof(unsigned int), stream0);
+		addKernel1 <<<blocks, threads, 0, stream0 >>>(dev_a, dev_b, dev_c, dev_f, dev_g, dev_h, dev_i, dev_j, dev_k, dev_n);
 		//cudaStreamSynchronize(stream0);
 		//We should try to generate the next array of primes in here!
 		
 
 		cudaEventRecord(stop, stream0);
+  //unsigned int *KernelPOld;
 		if (low < high) {
-			generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1, mask);
+  memcpy (KernelPOld, KernelP, arraySize * sizeof(unsigned int));
+   
+		generateGPUPrimes(KernelP, low, smallP, testArraySize, primeCount, arraySize, mark1, mask, mask1, mask2, mask3);
 		}
 		//cudaEventQuery(stop);
 		//cudaDeviceSynchronize();
 		cudaEventSynchronize(stop);
 		cudaStreamSynchronize(stream0);
 
-		end = clock();
-		time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
-		cout << "Time to execute kernel (outside function) " << time_spent << "s" << endl;
-		cout << "" << endl;
+  // Copy output vector from GPU buffer to host memory.
+  cudaStatus = cudaMemcpy(NOut, dev_a, 2 * arraySize * sizeof(int), cudaMemcpyDeviceToHost);
+  if (cudaStatus != cudaSuccess) {
+    fprintf(stderr, "cudaMemcpy output failed!");
+  }
+  
+  for (int i=0; i<arraySize; i++) {
+    if (NOut[arraySize+i] > 0) {    
+      if (verify == 1) {
+        //We should verify this factor before adding it to the output. 
+        //This involve two steps, make sure the 'n' value is in the sieve file and then check the factor is correct.
+        //As the sieve runs datless most factors will not be useful as the 'n' value won't be in the sieve file.
+        unsigned int nVal = NOut[arraySize+i];
+        unsigned int kVal = NOut[i];
+        unsigned long long factorCandidate = KernelPOld[i] + oldLow;
+        
+        //Check the sieve file
+        for (int k=0; k<count3; k++) {
+          //Search for a 0
+          if (kns[k] == 0) {
+            if (kns[k+1] == kVal) {
+              //We've found the correct k, now loop through the n values
+              int x = 1;
+              int y = k+2;
+              while (x>0) {
+                x = kns[y];
+                y++;
+                if (x == nVal) {
+                 //We've had a match, so this n-value was in the original sieve file
+                 //Check the factor is valid
+                 
+                 unsigned __int128 val = baseCPU;
+                 for (int j=1; j<nVal; j++){
+                  val = val*baseCPU;
+                  val = val%factorCandidate;
+                 }
+
+                 val = val*kVal;
+                 val = val%factorCandidate;
+                 //Subtracting 1 should leave 0, so check that val is 1.
+                 if (val == 1) {
+                   //Factor is valid
+                   cout << factorCandidate  << " | " << kVal << "*" << baseCPU << "^" << nVal << "-1" << endl;
+                   writeFactorToFile(factorCandidate, kVal, baseCPU, nVal, FactorFile);
+                   factorCount++;
+                 }
+                 break;
+                }
+                if (x > nVal) {
+                 //We've already gone past where this value would have been, so can give up.
+                 break;
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      else if (verify == 0) {
+        //Just print out the factor to the screen and save it in the factor file.
+        cout << KernelPOld[i] + oldLow  << " | " << NOut[i] << "*" << baseCPU << "^" << NOut[arraySize+i] << "-1" << endl;
+        writeFactorToFile(KernelPOld[i] + oldLow, NOut[i], baseCPU, NOut[arraySize+i], FactorFile);
+        factorCount++;
+      }
+      
+      else {
+       //We should never get here, verify should only ever be 0 or 1.
+       cout << "Error: Verify has an unexpected value: " << verify << endl; 
+      }
+    }
+  }
+
+  
+		//end = clock();
+		//time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+		//cout << "Time to execute kernel (outside function) " << time_spent << "s" << endl;
+		//cout << "Progress = " << progress << " at " << progress / time_spent << " p/sec" << endl;
+		//cout << "" << endl;
+		auto end = std::chrono::high_resolution_clock::now();
+		std::chrono::duration<double> time_spent = (end - begin);
+		//cout << "Time to execute kernel (outside function) " << time_spent.count() << "s" << endl;
+		//cout << "Progress = " << progress << " at " << progress / time_spent.count() << " p/sec" << endl;
+		double percent = (((double)((low - 2) - startLow) / (high-startLow)))*100;
+		std::chrono::duration<double> timeSoFar = (end - loopTime);
+		double timeLeft = ((double)100.0/percent * timeSoFar.count()) - timeSoFar.count();
+		//std::chrono::time_point<std::chrono::system_clock> ETA += std::chrono::seconds(timeLeft);
+		std::time_t ETA = std::chrono::system_clock::to_time_t(end + std::chrono::seconds((int)timeLeft)); 
+
+		if (percent > 100) {
+			percent = 100;
+			timeLeft = 0;
+		}
+		//printf("%.2f%% done, Remaining time %.2fs. ",percent, timeLeft);
+
+  //We should update this to run every X seconds where X is user configurable. It is only a minimum time between outputs as the kernel may take longer than X.
+		if (kernelCount % 20 == 0) {
+		  char *ETAnice = strtok(ctime(&ETA), "\n");
+		  printf("p=%llu, %.0f p/sec,  %.2f%% done, %d factors found, ETA %s \n", low, progress / time_spent.count(), percent, factorCount, ETAnice);
+		  //fflush(stdout);
+		}
+
+
+
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "Something went wrong in running the kernel");
+			//goto Error;
+		}
 
 	}
 
-	clock_t loopEnd = clock();
-	time_spent = (double)(loopEnd - loopTime) / CLOCKS_PER_SEC;
-	cout << "Time taken " << time_spent << "s" << endl;
-	cout << "Time per kernel " << time_spent / kernelCount << endl;
-	cout << "Progress = " << (low - 2) - startLow << " at " << ((low - 2) - startLow) / time_spent << " p/sec" << endl << endl;
+	//clock_t loopEnd = clock();
+	//time_spent = (double)(loopEnd - loopTime) / CLOCKS_PER_SEC;
+	//cout << "Time taken " << time_spent << "s" << endl;
+	//cout << "Time per kernel " << time_spent / kernelCount << endl;
+	//cout << "Progress = " << (low - 2) - startLow << " at " << ((low - 2) - startLow) / time_spent << " p/sec" << endl << endl;
+	auto loopEnd = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double> loop_time_spent = (loopEnd - loopTime);
+	cout << endl;
+	cout << "Time taken: " << loop_time_spent.count() << "s" << endl;
+ cout << "Factors found: " << factorCount << " at " << loop_time_spent.count() / factorCount << " seconds per factor"  << endl;
+	cout << "Time per kernel: " << loop_time_spent.count() / kernelCount << endl;
+	cout << "Progress = " << (low - 2) - startLow << " at " << ((low - 2) - startLow) / loop_time_spent.count() << " p/sec" << endl << endl;
+
 
 	//Reprint the CUDA info
-	wcout << "CUDA version:   v" << CUDART_VERSION << endl;
+	//wcout << "CUDA version:   v" << CUDART_VERSION << endl;
 
 	cudaGetDeviceCount(&devCount);
-	wcout << "CUDA Devices: " << devCount << endl;
+	//wcout << "CUDA Devices: " << devCount << endl;
 
 	for (int i = 0; i < devCount; ++i)
 	{
@@ -1330,9 +1803,9 @@ int main(int argc, char* argv[])
 		wcout << endl;
 	}
 
-	cout << "Each thread used " << hashTableSize * hashScaling << " buckets, to store " << hashTableSize << " elements. (Density 1/" << hashScaling << ")" << endl;
-	cout << "Hash table size was " << (hashTableSize*hashScaling * 4 * arraySize) / mb << "mb of GPU RAM" << endl;
-	cout << "Blocksize = " << blocks << ". Threads per block = " << threads << "." << endl;
+	//cout << "Each thread used " << hashTableSize * hashScaling << " buckets, to store " << hashTableSize << " elements. (Density 1/" << hashScaling << ")" << endl;
+	//cout << "Hash table size was " << (hashTableSize*hashScaling * 4 * arraySize) / mb << "mb of GPU RAM" << endl;
+	//cout << "Blocksize = " << blocks << ". Threads per block = " << threads << "." << endl;
 
 Error:
 	cudaFree(dev_b);
@@ -1354,8 +1827,16 @@ Error:
 	return 0;
 }
 
-void generateGPUPrimes(unsigned int *KernelP1, unsigned long long low, unsigned int *smallP, int testArraySize, int primeCount, int arraySize, unsigned long long *mark1, unsigned long long *mask) {
-	clock_t begin = clock();
+
+void writeFactorToFile(unsigned long long p, unsigned int k, unsigned int b, unsigned int n, char *factorFile) {
+ //Factors will be of the form p | k*b^n-1
+ FILE *file = fopen(factorFile, "a");
+ fprintf(file, "%llu | %d*%d^%d-1\n", p, k, b, n);
+ fclose(file);
+}
+
+void generateGPUPrimes(unsigned int *KernelP1, unsigned long long low, unsigned int *smallP, int testArraySize, int primeCount, int arraySize, unsigned long long *mark1, unsigned long long *mask, unsigned long long *mask1, unsigned long long *mask2, unsigned long long *mask3) {
+//	clock_t begin = clock();
 	unsigned int diff = 0;
 
 	//for (int i = 0; i < ((testArraySize / 32) + 1); i++) {
@@ -1380,19 +1861,111 @@ void generateGPUPrimes(unsigned int *KernelP1, unsigned long long low, unsigned 
 	//mask[14] = 0x3496692cd259a4b3;
 	//mask[7] = 0x496692cd259a4b34;
 
-	unsigned int offset = low % 15015;
-	offset = (offset * 12317) % 15015;
+	//unsigned int offset = low % 15015;
+	//offset = (offset * 12317) % 15015;
 
 
-	for (int i = 0; i < ((testArraySize / 64) + 1); i++) {
-		mark1[i] = mask[offset];
+	//for (int i = 0; i < ((testArraySize / 64) + 1); i++) {
+	//	mark1[i] = mask[offset];
 		//cout << mark1[i] << endl;
-		offset++;;
-		if (offset > 15014) {
-			offset = offset - 15015;
-		}
-	}
+	//	offset++;;
+	//	if (offset > 15014) {
+	//		offset = offset - 15015;
+	//	}
+	//}
 
+
+	//Mask 3*5*7*11*13*17*19
+//	unsigned long long offset = low % 4849845;
+//	offset = (offset * 3751052) % 4849845;
+
+
+//	for (int i = 0; i < ((testArraySize / 64) + 1); i++) {
+//		mark1[i] = mask[offset];
+		//cout << mark1[i] << endl;
+//	 offset++;;
+//		if (offset > 4849844) {
+//			offset = offset - 4849845;
+//		}
+//	}
+
+	//Mask 23*29*31*37
+//	offset = low % 765049;
+//	offset = (offset * 328732) % 765049;
+
+
+//	for (int i = 0; i < ((testArraySize / 64) + 1); i++) {
+//		mark1[i] = mark1[i] | mask1[offset];
+		//cout << mark1[i] << endl;
+//		offset++;;
+//		if (offset > 765048) {
+//			offset = offset - 765049;
+//		}
+//	}
+ 
+ //Can we combine these two masks together quickly??
+ 	//The groups are: 3,5,19,37,47    11,17,43,61    13,23,31,53    7,29,41,59
+
+	//Mask 3*5*7*11*13*17*19
+	//unsigned long long offset = low % 4849845;
+	//offset = (offset * 3751052) % 4849845;
+ 
+ //Mask 23*29*31*37
+	//unsigned long long offset1 = low % 765049;
+	//offset1 = (offset1 * 328732) % 765049;
+ 
+ 	//for (int i = 0; i < ((testArraySize / 64) + 1); i++) {
+		//mark1[i] = mask[offset] | mask1[offset1];
+  //offset++;
+		//if (offset > 4849844) {
+		//	offset = offset - 4849845;
+		//}
+		//offset1++;
+		//if (offset1 > 765048) {
+		//	offset1 = offset1 - 765049;
+		//}
+	//}
+ 
+ //Mask 3*5*19*37*47
+ unsigned long long offset = low % 495615;
+	offset = (offset * 3872) % 495615;
+ 
+ //Mask 11*17*43*61
+ unsigned long long offset1 = low % 490501;
+	offset1 = (offset1 * 195434) % 490501;
+ 
+ //Mask 13*23*31*53
+ unsigned long long offset2 = low % 491257;
+	offset2 = (offset2 * 211087) % 491257;
+ 
+ //Mask 7*29*41*59
+ unsigned long long offset3 = low % 491057;
+	offset3 = (offset3 * 180310) % 491057;
+ 
+ 
+ for (int i = 0; i < ((testArraySize / 64) + 1); i++) {
+	  mark1[i] = mask[offset] | mask1[offset1] | mask2[offset2] | mask3[offset3];
+   offset++;
+		 if (offset > 495614) {
+			  offset = offset - 495614;
+		 }
+		 offset1++;
+		 if (offset1 > 490500) {
+		   offset1 = offset1 - 490500;
+		 }
+   offset2++;
+		 if (offset2 > 491256) {
+			  offset2 = offset2 - 491256;
+		 }
+		 offset3++;
+		 if (offset3 > 491056) {
+		   offset3 = offset3 - 491056;
+		 }
+	}
+ 
+ 
+ 
+ 
 
 	//Lets deal with multiples of 3 separately using a mask.
 	//unsigned int mask[3];
@@ -1420,17 +1993,27 @@ void generateGPUPrimes(unsigned int *KernelP1, unsigned long long low, unsigned 
 	//	mark1[i] = mark1[i] | mask1[(offset + i) % 5];
 	//}
 
-	clock_t end = clock();
-	double time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
-	cout << "Time setting the masks " << time_spent << "s" << endl;
-	unsigned int totalTouches = 0;
+//	clock_t end = clock();
+//	double time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+//	cout << "Time setting the masks " << time_spent << "s" << endl;
 
-	begin = clock();
-	//Start at 5 now as we deal with 3,5,7,11,13 with masks.
-	for (int i = 5; i < primeCount; i++) {
+ 
+ 
+ //This section deals will all small primes that are not in the masks above
+ 
+//	begin = clock();
+// unsigned int totalTouches = 0;
+ 
+ int intbool = 0;
+ int intshift = 0;
+// unsigned int touch = 0;
+ //int changes = 0;
+ 
+	//Start at 11 now as we deal with 3,5,7,11,13,17,19,23,29,31,37 with masks.
+	//#pragma omp parallel for num_threads(4)
+	for (int i = 17; i < primeCount; i++) {
 		unsigned int smallPrime = smallP[i];
 		unsigned int mod = low % smallPrime;
-		unsigned int touch = 0;
 
 		if (mod == 0) {
 			diff = 0;
@@ -1446,11 +2029,17 @@ void generateGPUPrimes(unsigned int *KernelP1, unsigned long long low, unsigned 
 
 		for (int k = diff; k < testArraySize; k += smallPrime) {
 			//Take k and divide it by 32 to work out which int we are in. Shift by the remainder
-			int intbool = k / 64; //Find the right int
-			int intshift = k & 63; //Work out the shift
+   intbool = k >> 6; //Find the right int. This is slightly faster than division by 64.
+			intshift = k & 63; //Work out the shift
 			
+   //int num_one_bits = __builtin_popcountl(mark1[intbool]);
 			mark1[intbool] = mark1[intbool] | (0x8000000000000000 >> intshift);
-			touch++;
+//			touch++;
+   //int new_num_one_bits = __builtin_popcountl(mark1[intbool]);
+   
+   //if (num_one_bits < new_num_one_bits) {
+   // changes++;
+   //}
 
 			//if (((mark1[intbool] >> (31 - intshift)) & 1) == 1) {
 				//Do nothing - this bit is already 1
@@ -1459,41 +2048,72 @@ void generateGPUPrimes(unsigned int *KernelP1, unsigned long long low, unsigned 
 			//	mark1[intbool] += (0x80000000 >> intshift);
 			//}
 		}
-		//if (smallPrime < 30) {
-		//	cout << smallPrime << ": " << touch << endl;
-		//}
-		totalTouches += touch;
-		touch = 0;
+//		if (smallPrime < 64) {
+//			cout << smallPrime << ": " << touch << endl;
+//		}
+//		totalTouches += touch;
+//		touch = 0;
 
 	}
 
-	cout << totalTouches << endl;
+//	cout << totalTouches << endl;
+ //cout << "Changes made marking prime array: " << changes << endl;
 
-	end = clock();
-	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
-	cout << "Time marking the prime array " << time_spent << "s" << endl;
+//	end = clock();
+//	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+//	cout << "Time marking the prime array " << time_spent << "s" << endl;
 
-	begin = clock();
+//	begin = clock();
 	//Use mark1 to decide if we need to add a prime. We're looking for 0 entries in these ints
 	int countPrimes = 0;
-	for (int i = 0; i < testArraySize; i++) {
-		int intbool = i / 64; //Find the right int
-		int intshift = i & 63; //Work out the shift
-		if (((mark1[intbool] >> (63 - intshift)) & 1) == 0) {
-			KernelP1[countPrimes] = 2 * i;
-			if ((2 * i + low) % 5 == 0) {
-				cout << "Prime added: " << 2 * i + low << endl;
-			}
-			countPrimes++;
-			if (countPrimes == arraySize) {
-				cout << "We got as far as " << 2*i + low << " out of " << low + (testArraySize*2) << endl;
+// int lasti = 0;
+ 
+	//for (int i = 0; i < testArraySize; i++) {
+	//	int intbool = i / 64; //Find the right int
+	//	int intshift = i & 63; //Work out the shift
+	//	if (((mark1[intbool] >> (63 - intshift)) & 1) == 0) {
+ 
+ //cout << testArraySize << testArraySize/64 << endl;
+ for (int i = 0; i< testArraySize/64; i++) {
+   //int num_zero_bits = 64 - __builtin_popcountl(mark1[i]);
+   //cout << "Number of prime candidates in this long: " << num_zero_bits << endl;
+   //cout << "Check entry " << i << endl;
+   for (int j = 0; j<64; j++) { 
+     if (((mark1[i] >> (63 - j)) & 1) == 0) {
+			    KernelP1[countPrimes] = 2 * (i*64 + j);
+			    countPrimes++;
+       		  
+       if (countPrimes == arraySize) {
+				   //cout << "We got as far as " << 2*i + low << " out of " << low + (testArraySize*2) << endl;
+//       lasti = i;
+				   break;
+       }
+       
+       //Prime candidates are not very dense, so we look for an early break in this loop. 
+       //Once a prime candidate has been added to the list we set the mark to 1, and check to see if all marks are now 1 by comparing with max value for ulonglong.
+       mark1[i] = mark1[i] | (0x8000000000000000 >> j);
+       if (mark1[i] == 18446744073709551615) {
+         break;
+       }
+			  }
+	  }
+  			if (countPrimes == arraySize) {
+				//cout << "We got as far as " << 2*i + low << " out of " << low + (testArraySize*2) << endl;
 				break;
-			}
-		}
+    }
 	}
+ 
+ if (countPrimes < arraySize) {
+   cout << "Error: Not enough primes in the buffer to send to GPU. Must increase the constants that control the value of testArraySize" << endl;
+   cout << "countPrimes = " << countPrimes << ". arraySize = " << arraySize << endl;
+   exit(1);
+ }
+ 
+// cout << "Used " << lasti << " out of " << testArraySize/64 << " elements of the testArray " << (100*lasti)/(testArraySize/64) << "%" << endl;  
 
-	end = clock();
-	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
-	cout << "Time generating kernel primes " << time_spent << "s" << endl;
+//	end = clock();
+//	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+//	cout << "Time generating kernel primes " << time_spent << "s" << endl;
 
 }
+
