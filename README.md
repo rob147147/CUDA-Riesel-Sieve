@@ -14,9 +14,9 @@ The test file is R745.ABCD which contains 22 k-values, with n-min = 180,000 and 
 CPU (1 core of i5-4440 @ 3.1Ghz, using SR2Sieve) - 6,000,000 p/sec<br />
 
 <br />
-Latest update as of 17/05/23:
+Latest update as of 17/05/23:<br/>
 <b>Nvidia GeForce RTX 2080 Ti (11750 GFLOPS, 11GB RAM, 5632kb L2 Cache, 250W) - 125,000,000 p/sec (with params -b 5 -m 4 -s 256 -Q 18) using the Linux executable</b> <br />
-This appears to be GPU performance limited (CPU usage ~35%), and runs about 1.75-2 times quicker than srsieve2cl on the same GPU.  
+This appears to be GPU performance limited (CPU usage ~35%), and runs about 1.75-2 times quicker than srsieve2cl on the same GPU.  <br/><br/>
 
 Nvidia GeForce GTX 1060 (3855 GFLOPS, 6GB RAM, 1536kb L2 cache, 120 Watts) - ~23,000,000 p/sec @90% TDP ~108W (wth params -b 7 -m 5 -s 256 -Q 18) <br /> 
 Nvidia MX150 (1177 GFLOPS, 2GB RAM, 512kb L2 cache, 25 Watts) - 6,500,000 p/sec (with params -b 5 -m 5)<br />
